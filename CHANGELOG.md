@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2025-09-24)
 
 - Rewrote ZipDownload streaming implementation to use ZipStream-PHP and stream archives without building a local temp ZIP.
 - Added IIIF-first strategy: prefer IIIF-rendered images when available, fallback to local original, then large thumbnail.
