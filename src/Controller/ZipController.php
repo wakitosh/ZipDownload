@@ -4,27 +4,41 @@ declare(strict_types=1);
 
 namespace ZipDownload\Controller;
 
-use Laminas\Http\Headers;
-use Laminas\Http\Response as HttpResponse;
-use Laminas\Http\Response\Stream as StreamResponse;
+use ZipStream\Option\Archive;
+use ZipStream\ZipStream;
+
+require_once __DIR__ . '/../../vendor/autoload.php';
+
 use Laminas\Mvc\Controller\AbstractActionController;
 use Omeka\Entity\Media;
 
 /**
- * Build and stream a ZIP archive of item media (local store only).
+ * Build and stream a ZIP archive (IIIF-first).
  */
 class ZipController extends AbstractActionController {
   /**
-   * Doctrine entity manager.
+   * Default runtime limits.
+   *
+   * These values are conservative for the described production environment
+   * (MySQL and Cantaloupe are already allocated significant memory).
+   */
+  private const MAX_CONCURRENT_DOWNLOADS_GLOBAL = 1;
+  private const MAX_BYTES_PER_DOWNLOAD = 3221225472;
+  private const MAX_TOTAL_ACTIVE_BYTES = 6442450944;
+  private const MAX_FILES_PER_DOWNLOAD = 1000;
+  private const PROGRESS_TOKEN_TTL = 7200;
+
+  /**
+   * Doctrine ORM entity manager.
    *
    * @var \Doctrine\ORM\EntityManager
    */
   private $em;
 
   /**
-   * Logger.
+   * Application logger.
    *
-   * @var \Psr\Log\LoggerInterface|null
+   * @var \Psr\Log\LoggerInterface
    */
   private $logger;
 
@@ -35,47 +49,130 @@ class ZipController extends AbstractActionController {
    */
   private $tempDir;
 
-  /**
-   * Construct controller with services.
-   *
-   * @param \Doctrine\ORM\EntityManager $entityManager
-   *   Entity manager.
-   * @param mixed $container
-   *   Service container.
-   */
   public function __construct($entityManager, $container) {
     $this->em = $entityManager;
-    $this->logger = $container->get('Omeka\Logger');
+    $this->logger = $container->get('Omeka\\Logger');
     $this->tempDir = sys_get_temp_dir();
   }
 
   /**
-   * Build and return a ZIP stream response for selected media.
-   *
-   * Accepts media_ids as a comma-separated string via POST (or query).
-   *
-   * @return \Laminas\Http\Response\Stream|HttpResponse
-   *   Streaming ZIP on success, or JSON error response.
+   * Stream a ZIP for an item with the given media ids (POST media_ids).
    */
   public function itemAction() {
     $id = (int) $this->params()->fromRoute('id');
-
-    $mediaIds = $this->params()->fromPost('media_ids', $this->params()->fromQuery('media_ids', []));
-    // Early trace: ensure we can confirm routing and param receipt in logs.
-    if ($this->logger) {
-      try {
-        $rawPost = $this->params()->fromPost('media_ids', '');
-        $rawGet = $this->params()->fromQuery('media_ids', '');
-        $this->logger->info('Zip request hit: item={item} media_ids_post={post} media_ids_query={query}', [
-          'item' => $id,
-          'post' => is_array($rawPost) ? implode(',', $rawPost) : (string) $rawPost,
-          'query' => is_array($rawGet) ? implode(',', $rawGet) : (string) $rawGet,
-        ]);
+    // ---- server-side concurrency/size guard ----
+    // Clean old progress files and compute current active totals.
+    $tmpdir = sys_get_temp_dir();
+    $pattern = $tmpdir . DIRECTORY_SEPARATOR . 'zipdownload_progress_*.json';
+    $files = glob($pattern) ?: [];
+    $activeCount = 0;
+    $activeBytes = 0;
+    $now = time();
+    foreach ($files as $f) {
+      $ok = @is_file($f) && @is_readable($f);
+      if (!$ok) {
+        continue;
       }
-      catch (\Throwable $e) {
-        // Ignore.
+      $data = @json_decode(@file_get_contents($f), TRUE) ?: [];
+      $ts = @filemtime($f) ?: 0;
+      if ($ts > 0 && ($now - $ts) > self::PROGRESS_TOKEN_TTL) {
+        @unlink($f);
+        continue;
+      }
+      $status = $data['status'] ?? '';
+      if ($status === 'running') {
+        $activeCount++;
+        $activeBytes += (int) ($data['total_bytes'] ?? 0);
       }
     }
+
+    // Determine requested estimate from client or do a quick local estimate.
+    $requestedEstimate = (int) $this->params()->fromPost('estimated_total_bytes', $this->params()->fromQuery('estimated_total_bytes', 0));
+    if ($requestedEstimate <= 0) {
+      // Quick estimation: sum media file sizes when available, otherwise
+      // fall back to a conservative default size per file.
+      // to a conservative per-file default of 2MB.
+      $midParam = $this->params()->fromPost('media_ids', $this->params()->fromQuery('media_ids', []));
+      if (is_string($midParam)) {
+        $midArr = array_filter(array_map('intval', explode(',', $midParam)));
+      }
+      elseif (is_array($midParam)) {
+        $midArr = array_map('intval', $midParam);
+      }
+      else {
+        $midArr = [];
+      }
+      $repo = $this->em->getRepository(Media::class);
+      $quickTotal = 0;
+      $countFiles = 0;
+      foreach ($midArr as $mid) {
+        $m = $repo->find($mid);
+        if (!$m) {
+          continue;
+        }
+        $countFiles++;
+        $sz = 0;
+        try {
+          $d = $m->getData();
+          if (is_array($d) && isset($d['file_size'])) {
+            $sz = (int) $d['file_size'];
+          }
+        }
+        catch (\Throwable $e) {
+          $sz = 0;
+        }
+        if ($sz <= 0 && $m->hasOriginal()) {
+          $services = $this->getEvent()->getApplication()->getServiceManager();
+          $store = $services->get('Omeka\\File\\Store');
+          $ext = method_exists($m, 'getExtension') ? (string) $m->getExtension() : '';
+          $ext = $ext !== '' ? ('.' . ltrim($ext, '.')) : '';
+          $orig = sprintf('original/%s%s', $m->getStorageId(), $ext);
+          if (method_exists($store, 'getLocalPath')) {
+            $p = $store->getLocalPath($orig);
+            if ($p && is_file($p)) {
+              $sz = filesize($p);
+            }
+          }
+        }
+        if ($sz <= 0) {
+          $sz = 2000000;
+        }
+        $quickTotal += $sz;
+      }
+      $requestedEstimate = $quickTotal;
+      $requestedFileCount = $countFiles;
+    }
+    else {
+      $requestedFileCount = (int) $this->params()->fromPost('estimated_file_count', $this->params()->fromQuery('estimated_file_count', 0));
+    }
+
+    // Check limits: concurrent downloads and total bytes.
+    if ($activeCount >= self::MAX_CONCURRENT_DOWNLOADS_GLOBAL) {
+      header('Content-Type: application/json', TRUE, 429);
+      echo json_encode(['error' => 'Too many concurrent downloads', 'retry_after' => 60]);
+      exit;
+    }
+    if ($requestedEstimate > self::MAX_BYTES_PER_DOWNLOAD) {
+      header('Content-Type: application/json', TRUE, 413);
+      echo json_encode([
+        'error' => 'Requested download too large',
+        'max_bytes_per_download' => self::MAX_BYTES_PER_DOWNLOAD,
+      ]);
+      exit;
+    }
+    if (($activeBytes + $requestedEstimate) > self::MAX_TOTAL_ACTIVE_BYTES) {
+      header('Content-Type: application/json', TRUE, 429);
+      echo json_encode(['error' => 'Server busy: total active bytes limit reached', 'retry_after' => 60]);
+      exit;
+    }
+    if ($requestedFileCount > self::MAX_FILES_PER_DOWNLOAD) {
+      header('Content-Type: application/json', TRUE, 413);
+      echo json_encode(['error' => 'Too many files requested', 'max_files_per_download' => self::MAX_FILES_PER_DOWNLOAD]);
+      exit;
+    }
+
+    $mediaIds = $this->params()->fromPost('media_ids', $this->params()->fromQuery('media_ids', []));
+
     if (is_string($mediaIds)) {
       $mediaIds = array_filter(array_map('intval', explode(',', $mediaIds)));
     }
@@ -86,7 +183,6 @@ class ZipController extends AbstractActionController {
       return $this->jsonError(400, 'No media selected');
     }
 
-    // Fetch media and verify permissions.
     $repo = $this->em->getRepository(Media::class);
     $medias = [];
     foreach ($mediaIds as $mid) {
@@ -94,17 +190,13 @@ class ZipController extends AbstractActionController {
       if (!$m) {
         continue;
       }
-      // Ensure media belongs to requested item.
       if (!$m->getItem() || (int) $m->getItem()->getId() !== $id) {
         continue;
       }
-      // Authorization: ensure current user can see this media.
-      $api = $this->api();
       try {
-        $api->read('media', $m->getId());
+        $this->api()->read('media', $m->getId());
       }
       catch (\Exception $e) {
-        // Skip unauthorized.
         continue;
       }
       $medias[] = $m;
@@ -113,30 +205,87 @@ class ZipController extends AbstractActionController {
       return $this->jsonError(403, 'No accessible media');
     }
 
-    // Stats for debug headers/logging.
     $addedTotal = 0;
     $addedOrig = 0;
     $addedIiif = 0;
     $addedThumb = 0;
-    if ($this->logger) {
-      try {
-        $this->logger->info('Zip start: item={item} medias={count}', ['item' => $id, 'count' => count($medias)]);
+
+    // Optional progress token from client to report status.
+    $progressToken = (string) $this->params()->fromPost('progress_token', $this->params()->fromQuery('progress_token', ''));
+    $totalBytesEstimate = 0;
+    $bytesSent = 0;
+    // Ensure startedAt is always defined for progress records.
+    $startedAt = time();
+    if ($progressToken) {
+      // Try to read total estimate from meta file if present.
+      $meta = $this->readProgress($progressToken);
+      if (isset($meta['total_bytes'])) {
+        $totalBytesEstimate = (int) $meta['total_bytes'];
       }
-      catch (\Throwable $e) {
-        // Ignore.
+      // Preserve an existing started_at if present.
+      if (isset($meta['started_at'])) {
+        $startedAt = (int) $meta['started_at'];
       }
+      $this->writeProgress(
+        $progressToken,
+        [
+          'status' => 'running',
+          'bytes_sent' => 0,
+          'total_bytes' => $totalBytesEstimate,
+          'started_at' => $startedAt,
+        ]
+      );
     }
 
-    // Create temporary ZIP file.
-    $zipPath = tempnam($this->tempDir, 'omeka_zip_');
-    $zip = new \ZipArchive();
-    if ($zip->open($zipPath, \ZipArchive::OVERWRITE) !== TRUE) {
-      return $this->jsonError(500, 'Cannot create zip');
-    }
-
-    // Add files by local path from local store (no HTTP fetch).
     $services = $this->getEvent()->getApplication()->getServiceManager();
-    $store = $services->get('Omeka\File\Store');
+    $store = $services->get('Omeka\\File\\Store');
+
+    $item = NULL;
+    $title = '';
+    try {
+      $item = $this->api()->read('items', $id)->getContent();
+      $title = trim((string) $item->displayTitle());
+    }
+    catch (\Exception $e) {
+      $title = '';
+    }
+    $title = $title !== '' ? $title : ('item-' . $id);
+    $safeTitle = $this->sanitizeFilename($title);
+    $encoded = rawurlencode($safeTitle . '.zip');
+
+    while (ob_get_level() > 0) {
+      @ob_end_clean();
+    }
+
+    if (function_exists('ini_get') && function_exists('ini_set')) {
+      $zlib = @ini_get('zlib.output_compression');
+      if ($zlib) {
+        @ini_set('zlib.output_compression', 'Off');
+      }
+    }
+
+    if (function_exists('header_remove') && !headers_sent()) {
+      @header_remove('Content-Type');
+      @header_remove('Content-Encoding');
+      @header_remove('Transfer-Encoding');
+      @header_remove('Content-Length');
+      @header_remove('Vary');
+    }
+
+    header('Content-Type: application/zip');
+    header("Content-Disposition: attachment; filename=\"download.zip\"; filename*=UTF-8''" . $encoded);
+    header('Content-Transfer-Encoding: binary');
+    header('Content-Encoding: identity');
+    header('Accept-Ranges: none');
+    header('Cache-Control: no-store, no-cache, must-revalidate');
+    header('Pragma: no-cache');
+    header('Expires: 0');
+    header('X-Zip-Trace: ZipController:itemAction');
+
+    $options = new Archive();
+    // Disable ZipStream header sending (we already sent HTTP headers).
+    $options->setSendHttpHeaders(FALSE);
+    $zip = new ZipStream(NULL, $options);
 
     $usedNames = [];
     $makeUnique = function (string $name) use (&$usedNames): string {
@@ -160,55 +309,70 @@ class ZipController extends AbstractActionController {
         $localPath = NULL;
         $zipName = NULL;
 
-        // Prefer original file from local storage.
+        // First, try IIIF fallback. If it yields images, prefer that.
+        $this->safeLog(
+          'info',
+          'Zip: trying IIIF fallback',
+          [
+            'media' => $media->getId(),
+            'source' => (string) $media->getSource(),
+          ]
+        );
+        $added = $this->addIiifImagesToZipStream($zip, $media, $makeUnique);
+        if ($added > 0) {
+          $addedIiif += $added;
+          $addedTotal += $added;
+          // Update progress: approximate bytes added from IIIF.
+          if ($progressToken) {
+            // If we have no precise size, add a rough default per file.
+            $approx = (int) max(
+              0,
+              floor(
+                ($totalBytesEstimate > 0 ? $totalBytesEstimate / max(1, $addedTotal) : 2000000)
+              )
+            );
+            $bytesSent += $approx * $added;
+            $this->writeProgress(
+              $progressToken,
+              [
+                'status' => 'running',
+                'bytes_sent' => $bytesSent,
+                'total_bytes' => $totalBytesEstimate,
+                'started_at' => $startedAt,
+              ]
+            );
+          }
+          continue;
+        }
+
+        // Next, try local original file if available.
         if ($media->hasOriginal()) {
           $ext = method_exists($media, 'getExtension') ? (string) $media->getExtension() : '';
           $ext = $ext !== '' ? ('.' . ltrim($ext, '.')) : '';
           $originalStoragePath = sprintf('original/%s%s', $media->getStorageId(), $ext);
-
           if (method_exists($store, 'getLocalPath')) {
             $candidatePath = $store->getLocalPath($originalStoragePath);
           }
           else {
             $candidatePath = NULL;
           }
-
+          // Debug: log candidatePath and flags.
+          $this->safeLog(
+            'info',
+            'Zip: media original check',
+            [
+              'media' => $media->getId(),
+              'hasOriginal' => $media->hasOriginal(),
+              'candidatePath' => $candidatePath ?? NULL,
+            ]
+          );
           if ($candidatePath && is_readable($candidatePath)) {
             $localPath = $candidatePath;
-            // Use original filename when available; otherwise storageId.ext.
             $zipName = $media->getFilename() ?: ($media->getStorageId() . $ext);
           }
-          else {
-            // Some installs may store original using the filename.
-            // Try as a fallback.
-            $filename = (string) $media->getFilename();
-            if ($filename !== '') {
-              $altOriginal = 'original/' . $filename;
-              if (method_exists($store, 'getLocalPath')) {
-                $altPath = $store->getLocalPath($altOriginal);
-                if ($altPath && is_readable($altPath)) {
-                  $localPath = $altPath;
-                  $zipName = $filename;
-                }
-              }
-            }
-          }
         }
 
-        if (!$localPath) {
-          // Always try IIIF fetch when no local original is available. This
-          // supports media imported via external tools where ingester detection
-          // is unreliable.
-          $added = $this->addIiifImagesToZip($zip, $media, $makeUnique);
-          if ($added > 0) {
-            $addedIiif += $added;
-            $addedTotal += $added;
-            // Added one or more images from IIIF; skip thumbnail fallback.
-            continue;
-          }
-        }
-
-        // Fallback to large thumbnail when original is not available.
+        // Then try large thumbnail local file.
         if (!$localPath && $media->hasThumbnails()) {
           $largeStoragePath = sprintf('large/%s.jpg', $media->getStorageId());
           if (method_exists($store, 'getLocalPath')) {
@@ -227,8 +391,25 @@ class ZipController extends AbstractActionController {
           continue;
         }
 
-        $zip->addFile($localPath, $makeUnique($zipName ?: basename($localPath)));
-        // Count local additions by type.
+        $zip->addFileFromPath((string) $makeUnique($zipName ?: basename($localPath)), (string) $localPath);
+        // Update progress with actual filesize when possible.
+        if ($progressToken) {
+          try {
+            $sz = is_file($localPath) ? filesize($localPath) : 0;
+            $bytesSent += $sz;
+            $this->writeProgress(
+              $progressToken,
+              [
+                'status' => 'running',
+                'bytes_sent' => $bytesSent,
+                'total_bytes' => $totalBytesEstimate,
+                'started_at' => $startedAt,
+              ]
+            );
+          }
+          catch (\Throwable $e) {
+          }
+        }
         if ($media->hasOriginal()) {
           $addedOrig++;
         }
@@ -239,158 +420,48 @@ class ZipController extends AbstractActionController {
       }
       catch (\Throwable $e) {
         if ($this->logger) {
-          $this->logger->warning('Zip add failed: ' . $e->getMessage());
+          $this->logWarning('Zip add failed: ' . $e->getMessage());
         }
       }
     }
 
-    $closed = $zip->close();
-    if ($closed !== TRUE) {
-      return $this->jsonError(500, 'Zip finalize failed');
+    $zip->finish();
+    if ($progressToken) {
+      $this->writeProgress(
+        $progressToken,
+        [
+          'status' => 'done',
+          'bytes_sent' => $bytesSent,
+          'total_bytes' => $totalBytesEstimate,
+          'started_at' => $startedAt,
+        ]
+      );
     }
 
-    // Stream ZIP to client.
-    // Clear any previous output buffers to avoid corrupting the binary stream.
-    try {
-      while (ob_get_level() > 0) {
-        @ob_end_clean();
-      }
-    }
-    catch (\Throwable $e) {
-      // Ignore.
-    }
-
-    // Avoid server-side output compression for binary stream.
-    if (function_exists('ini_get') && function_exists('ini_set')) {
-      $zlib = @ini_get('zlib.output_compression');
-      if ($zlib) {
-        @ini_set('zlib.output_compression', 'Off');
-      }
-    }
-
-    $stream = @fopen($zipPath, 'rb');
-    if (!$stream) {
-      return $this->jsonError(500, 'Cannot read zip');
-    }
-    @rewind($stream);
-
-    // Try to remove any previously set headers that could corrupt the stream.
-    if (function_exists('header_remove') && !headers_sent()) {
-      @header_remove('Content-Type');
-      @header_remove('Content-Encoding');
-      @header_remove('Transfer-Encoding');
-      @header_remove('Content-Length');
-      @header_remove('Vary');
-    }
-    else {
-      // If headers are already sent, log the origin to help debugging.
-      $file = '';
-      $line = 0;
-      if (headers_sent($file, $line) && $this->logger) {
-        $this->logger->warning(sprintf('Headers already sent before ZIP stream (at %s:%d).', (string) $file, (int) $line));
-      }
-    }
-
-    $response = new StreamResponse();
-    $response->setStream($stream);
-    $response->setStatusCode(200);
-    $headers = new Headers();
-    $headers->addHeaderLine('Content-Type', 'application/zip');
-    $headers->addHeaderLine('Content-Transfer-Encoding', 'binary');
-    $headers->addHeaderLine('Content-Encoding', 'identity');
-    $headers->addHeaderLine('Accept-Ranges', 'none');
-    $headers->addHeaderLine('Cache-Control', 'no-store, no-cache, must-revalidate');
-    $headers->addHeaderLine('Pragma', 'no-cache');
-    $headers->addHeaderLine('Expires', '0');
-    // Derive a nice filename from item title.
-    try {
-      $item = $this->api()->read('items', $id)->getContent();
-      $title = trim((string) $item->displayTitle());
-    }
-    catch (\Exception $e) {
-      $title = '';
-    }
-    $title = $title !== '' ? $title : ('item-' . $id);
-    // Sanitize filename without regex to avoid modifier issues and warnings.
-    $replMap = [
-      "\\" => '_',
-      "/" => '_',
-      ":" => '_',
-      "*" => '_',
-      "?" => '_',
-      '"' => '_',
-      "<" => '_',
-      ">" => '_',
-      "|" => '_',
-    ];
-    $safe = strtr($title, $replMap);
-    $encoded = rawurlencode($safe . '.zip');
-    // Provide both legacy filename and RFC 5987 filename*.
-    $headers->addHeaderLine('Content-Disposition', 'attachment; filename="download.zip"; filename*=UTF-8\'\'' . $encoded);
-    $size = @filesize($zipPath);
-    if ($size !== FALSE) {
-      $headers->addHeaderLine('Content-Length', (string) $size);
-    }
-    // Trace headers to help diagnose proxies/middleware issues.
-    $headers->addHeaderLine('X-Zip-Trace', 'ZipController:itemAction');
-    // Added files stats headers.
-    $headers->addHeaderLine('X-Zip-Added', (string) $addedTotal);
-    $headers->addHeaderLine('X-Zip-Added-Original', (string) $addedOrig);
-    $headers->addHeaderLine('X-Zip-Added-IIIF', (string) $addedIiif);
-    $headers->addHeaderLine('X-Zip-Added-Thumbnail', (string) $addedThumb);
-    if ($size !== FALSE) {
-      $headers->addHeaderLine('X-Zip-Size', (string) $size);
-    }
-    $response->setHeaders($headers);
-
-    // Cleanup after send.
-    register_shutdown_function(function () use ($zipPath): void {
-      if (file_exists($zipPath)) {
-          @unlink($zipPath);
-      }
-    });
-
-    // Log completion with stats.
     if ($this->logger) {
       try {
         $this->logger->info(
-          'Zip done: item={item} added={total} (orig={orig}, iiif={iiif}, thumb={thumb}) size={size}',
-          [
-            'item' => $id,
-            'total' => $addedTotal,
-            'orig' => $addedOrig,
-            'iiif' => $addedIiif,
-            'thumb' => $addedThumb,
-            'size' => ($size !== FALSE ? (int) $size : -1),
-          ]
+        'Zip done: item={item} added={total} (orig={orig}, iiif={iiif}, thumb={thumb})',
+        [
+          'item' => $id,
+          'total' => $addedTotal,
+          'orig' => $addedOrig,
+          'iiif' => $addedIiif,
+          'thumb' => $addedThumb,
+        ]
         );
       }
       catch (\Throwable $e) {
-        // Ignore.
       }
     }
 
-    return $response;
+    exit;
   }
 
   /**
-   * Add IIIF images (max size) into the ZIP for a given media.
-   *
-   * This parses the IIIF presentation JSON stored in the media (v2 or v3),
-   * derives Image API service URLs for each canvas, fetches the max-size
-   * rendition, and adds it to the ZipArchive.
-   *
-   * @param \ZipArchive $zip
-   *   The ZIP archive to add files into.
-   * @param \Omeka\Entity\Media $media
-   *   The media whose IIIF data to read.
-   * @param callable $makeUnique
-   *   A callback to uniquify filenames inside the zip.
-   *
-   * @return int
-   *   Number of images successfully added.
+   * Try to fetch IIIF images and add them to the given ZipStream.
    */
-  private function addIiifImagesToZip(\ZipArchive $zip, Media $media, callable $makeUnique): int {
+  private function addIiifImagesToZipStream(ZipStream $zip, Media $media, callable $makeUnique): int {
     $services = $this->getEvent()->getApplication()->getServiceManager();
     $client = NULL;
     try {
@@ -399,469 +470,277 @@ class ZipController extends AbstractActionController {
     catch (\Throwable $e) {
       $client = NULL;
     }
+    $this->safeLog(
+      'info',
+      'Zip: IIIF client availability',
+      [
+        'media' => $media->getId(),
+        'hasClient' => $client ? TRUE : FALSE,
+      ]
+    );
 
     $iiif = $media->getData();
     if (!is_array($iiif) || !$iiif) {
-      // As a fallback, try to fetch the manifest from source URL.
       $src = (string) $media->getSource();
       if ($src && $client) {
         try {
           $client->reset();
           $client->setOptions(['timeout' => 20]);
-          $response = $client->setUri($src)->setMethod('GET')->send();
-          if ($response->isOk()) {
-            $iiif = json_decode($response->getBody(), TRUE) ?: [];
-          }
-        }
-        catch (\Throwable $e) {
-          // Ignore.
-        }
-      }
-    }
-    if (!is_array($iiif) || !$iiif) {
-      // Second fallback: resolve item-level manifest URL and fetch it.
-      try {
-        $entityItem = $media->getItem();
-        $itemId = $entityItem ? (int) $entityItem->getId() : 0;
-        if ($itemId && $client) {
-          $manifestUrl = '';
-          // Try view helper 'iiifUrl' if present (IiifServer module installed).
-          try {
-            $vh = $services->get('ViewHelperManager');
-            if ($vh && $vh->has('iiifUrl')) {
-              $iiifUrlHelper = $vh->get('iiifUrl');
-              if ($iiifUrlHelper) {
-                $rep = $this->api()->read('items', $itemId)->getContent();
-                $manifestUrl = (string) $iiifUrlHelper($rep, 'manifest');
-              }
-            }
-          }
-          catch (\Throwable $e) {
-            // Ignore.
-          }
-          // If not resolved, read from item properties.
-          if ($manifestUrl === '') {
-            try {
-              $rep = $rep ?? $this->api()->read('items', $itemId)->getContent();
-              $val = $rep->value('dcterms:hasFormat', ['type' => 'uri', 'default' => NULL]);
-              if ($val) {
-                $manifestUrl = (string) (method_exists($val, 'uri') ? $val->uri() : (string) $val);
-              }
-              if ($manifestUrl === '') {
-                $val = $rep->value('dcterms:source', ['type' => 'uri', 'default' => NULL]);
-                if ($val) {
-                  $manifestUrl = (string) (method_exists($val, 'uri') ? $val->uri() : (string) $val);
-                }
-              }
-            }
-            catch (\Throwable $e) {
-              // Ignore.
-            }
-          }
-          // Final fallback: assume IiifServer route by item id (v3).
-          if ($manifestUrl === '') {
-            try {
-              $serverUrlHelper = $services->get('ViewHelperManager')->get('serverUrl');
-              $base = rtrim((string) $serverUrlHelper('/'), '/');
-              $manifestUrl = $base . '/iiif/3/' . $itemId . '/manifest';
-            }
-            catch (\Throwable $e) {
-              // Ignore.
-            }
-          }
-          if ($manifestUrl !== '') {
-            try {
-              $client->reset();
-              $client->setOptions(['timeout' => 20]);
-              $client->setHeaders(['Accept' => 'application/json']);
-              $response = $client->setUri($manifestUrl)->setMethod('GET')->send();
-              if ($response->isOk()) {
-                $iiif = json_decode($response->getBody(), TRUE) ?: [];
-              }
-            }
-            catch (\Throwable $e) {
-              // Ignore.
-            }
-          }
-        }
-      }
-      catch (\Throwable $e) {
-        // Ignore errors in manifest fallback.
-      }
-    }
-    if (!is_array($iiif) || !$iiif) {
-      return 0;
-    }
-
-    $images = $this->extractIiifImageEntries($iiif);
-    if (!$images) {
-      // The media data did not contain extractable IIIF entries.
-      // Try resolving the item-level manifest again as a fallback.
-      try {
-        if ($this->logger) {
-          $this->logger->info('IIIF: No images extracted from media data; trying item-level manifest fallback.');
-        }
-        $entityItem = $media->getItem();
-        $itemId = $entityItem ? (int) $entityItem->getId() : 0;
-        if ($itemId) {
-          $services = $this->getEvent()->getApplication()->getServiceManager();
-          $vh = $services->get('ViewHelperManager');
-          $manifestUrl = '';
-          // Helper if available.
-          try {
-            if ($vh && $vh->has('iiifUrl')) {
-              $iiifUrlHelper = $vh->get('iiifUrl');
-              if ($iiifUrlHelper) {
-                $rep = $this->api()->read('items', $itemId)->getContent();
-                $manifestUrl = (string) $iiifUrlHelper($rep, 'manifest');
-              }
-            }
-          }
-          catch (\Throwable $e) {
-            // Ignore.
-          }
-          // Properties fallback.
-          if ($manifestUrl === '') {
-            try {
-              $rep = $rep ?? $this->api()->read('items', $itemId)->getContent();
-              $val = $rep->value('dcterms:hasFormat', ['type' => 'uri', 'default' => NULL]);
-              if ($val) {
-                $manifestUrl = (string) (method_exists($val, 'uri') ? $val->uri() : (string) $val);
-              }
-              if ($manifestUrl === '') {
-                $val = $rep->value('dcterms:source', ['type' => 'uri', 'default' => NULL]);
-                if ($val) {
-                  $manifestUrl = (string) (method_exists($val, 'uri') ? $val->uri() : (string) $val);
-                }
-              }
-            }
-            catch (\Throwable $e) {
-              // Ignore.
-            }
-          }
-          // Local IiifServer fallback by id.
-          if ($manifestUrl === '') {
-            try {
-              $serverUrlHelper = $vh->get('serverUrl');
-              $base = rtrim((string) $serverUrlHelper('/'), '/');
-              $manifestUrl = $base . '/iiif/3/' . $itemId . '/manifest';
-            }
-            catch (\Throwable $e) {
-              // Ignore.
-            }
-          }
-          if ($manifestUrl !== '' && $client) {
-            try {
-              $client->reset();
-              $client->setOptions(['timeout' => 20]);
-              $client->setHeaders(['Accept' => 'application/json']);
-              $response = $client->setUri($manifestUrl)->setMethod('GET')->send();
-              if ($response->isOk()) {
-                $iiif2 = json_decode($response->getBody(), TRUE) ?: [];
-                if (is_array($iiif2) && $iiif2) {
-                  $images = $this->extractIiifImageEntries($iiif2);
-                  if ($this->logger) {
-                    $this->logger->info('IIIF: Fallback manifest fetched and parsed. entries={count}', ['count' => count($images)]);
-                  }
-                }
-              }
-            }
-            catch (\Throwable $e) {
-              // Ignore.
-            }
-          }
-        }
-      }
-      catch (\Throwable $e) {
-        // Ignore.
-      }
-    }
-    if (!$images) {
-      // Fallback: use media-level IIIF URL (source) directly as Image API base.
-      try {
-        $src = (string) $media->getSource();
-        if ($src && (strpos($src, '/iiif/2/') !== FALSE || strpos($src, '/iiif/3/') !== FALSE)) {
-          $serviceId = rtrim($src, '/');
-          // Optionally probe info.json to normalize the base id.
-          $infoBase = '';
-          if ($client) {
-            try {
-              $client->reset();
-              $client->setOptions(['timeout' => 15, 'maxredirects' => 3]);
-              $client->setHeaders([
-                'Accept' => 'application/ld+json, application/json',
-                'User-Agent' => 'Omeka-ZipDownload/1.0',
-              ]);
-              $r = $client->setUri($serviceId . '/info.json')->setMethod('GET')->send();
-              if ($r->isOk()) {
-                $j = json_decode($r->getBody(), TRUE) ?: [];
-                $infoBase = (string) ($j['id'] ?? ($j['@id'] ?? ''));
-              }
-            }
-            catch (\Throwable $e) {
-              // Ignore.
-            }
-          }
-          $base = $infoBase !== '' ? rtrim($infoBase, '/') : $serviceId;
-          $candidates = [
-            $base . '/full/max/0/default.jpg',
-            $base . '/full/full/0/default.jpg',
-            $base . '/max/full/0/default.jpg',
-            $base . '/full/max/0/default.png',
-            $base . '/full/pct:100/0/default.jpg',
-            $base . '/full/pct:100/0/color.jpg',
-          ];
-          $fetched = FALSE;
-          $body = '';
-          $ext = '';
-          foreach ($candidates as $url) {
-            try {
-              $client->reset();
-              $client->setOptions(['timeout' => 25, 'maxredirects' => 3]);
-              $client->setHeaders([
-                'Accept' => 'image/jpeg,image/*;q=0.8,*/*;q=0.5',
-                'User-Agent' => 'Omeka-ZipDownload/1.0',
-              ]);
-              $resp = $client->setUri($url)->setMethod('GET')->send();
-              if ($resp->isOk()) {
-                $b = $resp->getBody();
-                if ($b !== '' && $b !== NULL) {
-                  $body = $b;
-                  $ext = $this->guessImageExtension($url, $resp->getHeaders()->get('Content-Type'));
-                  $fetched = TRUE;
-                  break;
-                }
-              }
-            }
-            catch (\Throwable $e) {
-              // Continue to next.
-            }
-          }
-          if ($fetched) {
-            $entityItem = $media->getItem();
-            $itemId = $entityItem ? (int) $entityItem->getId() : 0;
-            $titleBase = 'item-' . $itemId;
-            try {
-              if ($itemId) {
-                $rep = $this->api()->read('items', $itemId)->getContent();
-                $titleBase = trim((string) $rep->displayTitle()) ?: $titleBase;
-              }
-            }
-            catch (\Throwable $e) {
-              // Ignore.
-            }
-            $titleBase = $this->sanitizeFilename($titleBase);
-            $label = 'media-' . $media->getId();
-            $name = $titleBase . '_' . $label . $ext;
-            $zip->addFromString($makeUnique($name), $body);
-            return 1;
-          }
-        }
-      }
-      catch (\Throwable $e) {
-        // Ignore errors in source-based fallback.
-      }
-      return 0;
-    }
-
-    // If multiple images were found from the item manifest but only a single
-    // media was selected, try to filter images down to the one corresponding
-    // to this media using the media source identifier (when available).
-    try {
-      $src = (string) $media->getSource();
-      if ($src && (strpos($src, '/iiif/2/') !== FALSE || strpos($src, '/iiif/3/') !== FALSE) && count($images) > 1) {
-        $srcId = $this->iiifIdentifierFromUrl($src);
-        if ($srcId !== '') {
-          $filtered = [];
-          foreach ($images as $img) {
-            $sid = isset($img['serviceId']) ? (string) $img['serviceId'] : '';
-            $did = isset($img['directId']) ? (string) $img['directId'] : '';
-            $sidId = $sid !== '' ? $this->iiifIdentifierFromUrl($sid) : '';
-            $didId = $did !== '' ? $this->iiifIdentifierFromUrl($did) : '';
-            if (($sidId !== '' && $sidId === $srcId) || ($didId !== '' && $didId === $srcId)) {
-              $filtered[] = $img;
-            }
-          }
-          if ($filtered) {
-            $images = $filtered;
-          }
-          else {
-            // As a safety, if we cannot map, limit to the first image to
-            // avoid packing all canvases when only one media is selected.
-            $images = [$images[0]];
-          }
-        }
-      }
-    }
-    catch (\Throwable $e) {
-      // Ignore.
-    }
-
-    $added = 0;
-    $titleBase = '';
-    try {
-      $entityItem = $media->getItem();
-      $itemId = $entityItem ? (int) $entityItem->getId() : 0;
-      if ($itemId) {
-        $rep = $this->api()->read('items', $itemId)->getContent();
-        $titleBase = trim((string) $rep->displayTitle());
-      }
-    }
-    catch (\Throwable $e) {
-      $titleBase = '';
-    }
-    $titleBase = $this->sanitizeFilename($titleBase ?: ('item-' . (int) $media->getItem()->getId()));
-
-    foreach ($images as $idx => $img) {
-      $candidates = isset($img['candidates']) && is_array($img['candidates']) ? $img['candidates'] : [];
-      $serviceId = isset($img['serviceId']) ? (string) $img['serviceId'] : '';
-      $label = $img['label'];
-      // Skip if no HTTP client available.
-      if (!$client) {
-        continue;
-      }
-      try {
-        // If a service id is available, try fetching info.json to derive a
-        // stable base URL and possibly a best-fit size. Prepend these
-        // candidates.
-        if ($serviceId !== '') {
-          try {
-            $client->reset();
-            $client->setOptions(['timeout' => 20, 'maxredirects' => 3]);
-            $client->setHeaders([
-              'Accept' => 'application/ld+json, application/json',
-              'User-Agent' => 'Omeka-ZipDownload/1.0',
-            ]);
-            $respInfo = $client->setUri(rtrim($serviceId, '/') . '/info.json')->setMethod('GET')->send();
-            if ($respInfo->isOk()) {
-              $info = json_decode($respInfo->getBody(), TRUE) ?: [];
-              $infoBase = (string) ($info['id'] ?? ($info['@id'] ?? ''));
-              if ($infoBase !== '') {
-                $infoBase = rtrim($infoBase, '/');
-                $infoW = (int) ($info['width'] ?? 0);
-                $infoH = (int) ($info['height'] ?? 0);
-                $infoCandidates = [];
-                // If server doesn't accept "max", try explicit full pixel
-                // sizes first.
-                if ($infoW > 0) {
-                  $infoCandidates[] = $infoBase . '/full/' . $infoW . ',/0/default.jpg';
-                }
-                if ($infoH > 0) {
-                  $infoCandidates[] = $infoBase . '/full/,' . $infoH . '/0/default.jpg';
-                }
-                // General full-size fallbacks.
-                $infoCandidates[] = $infoBase . '/full/max/0/default.jpg';
-                $infoCandidates[] = $infoBase . '/full/full/0/default.jpg';
-                $infoCandidates[] = $infoBase . '/max/full/0/default.jpg';
-                $infoCandidates[] = $infoBase . '/full/max/0/default.png';
-                // If sizes are provided, try the largest width as an
-                // additional safe candidate.
-                if (isset($info['sizes']) && is_array($info['sizes']) && !empty($info['sizes'])) {
-                  $sizes = $info['sizes'];
-                  usort($sizes, function ($a, $b) {
-                    $wa = (int) ($a['width'] ?? 0);
-                    $wb = (int) ($b['width'] ?? 0);
-                    return $wb <=> $wa;
-                  });
-                  $w = (int) ($sizes[0]['width'] ?? 0);
-                  $h = (int) ($sizes[0]['height'] ?? 0);
-                  if ($w > 0 && $h > 0) {
-                    // Prefer width-constrained; servers generally accept "w,".
-                    $infoCandidates[] = $infoBase . '/full/' . $w . ',/0/default.jpg';
-                  }
-                }
-                // Prepend and deduplicate.
-                $candidates = array_values(array_unique(array_merge($infoCandidates, $candidates)));
-              }
-            }
-          }
-          catch (\Throwable $e) {
-            // Ignore info.json errors.
-          }
-        }
-        $fetched = FALSE;
-        $body = '';
-        $ext = '';
-        foreach ($candidates as $url) {
-          try {
-            $client->reset();
-            $client->setOptions(['timeout' => 30, 'maxredirects' => 3]);
-            $client->setHeaders([
-              'Accept' => 'image/jpeg,image/*;q=0.8,*/*;q=0.5',
-              'User-Agent' => 'Omeka-ZipDownload/1.0',
-            ]);
-            $response = $client->setUri($url)->setMethod('GET')->send();
-            if ($response->isOk()) {
-              $b = $response->getBody();
-              if ($b !== '' && $b !== NULL) {
-                $body = $b;
-                $ext = $this->guessImageExtension($url, $response->getHeaders()->get('Content-Type'));
-                $fetched = TRUE;
-                break;
-              }
-            }
-            elseif ($this->logger) {
-              $this->logger->notice(
-                'IIIF candidate not OK: {status} {url}',
+          $resp = $client->setUri($src)->setMethod('GET')->send();
+          $this->safeLog(
+            'info',
+            'Zip: fetched IIIF info.json',
+            [
+              'media' => $media->getId(),
+              'uri' => $src,
+              'ok' => $resp->isOk(),
+            ]
+          );
+          if ($resp->isOk()) {
+            $body = $resp->getBody();
+            $this->safeLog(
+              'info',
+              'Zip: IIIF info.json length',
+              [
+                'media' => $media->getId(),
+                'len' => is_string($body) ? strlen($body) : 0,
+              ]
+            );
+            $iiif = json_decode($body, TRUE) ?: [];
+            if (!is_array($iiif) || !$iiif) {
+              $this->safeLog(
+                'warning',
+                'Zip: IIIF info.json JSON decode empty or invalid',
                 [
-                  'status' => $response->getStatusCode(),
-                  'url' => $url,
+                  'media' => $media->getId(),
+                  'uri' => $src,
                 ]
               );
             }
           }
-          catch (\Throwable $e) {
-            if ($this->logger) {
-              $this->logger->notice('IIIF candidate error: ' . $e->getMessage());
+        }
+        catch (\Throwable $e) {
+          $this->safeLog(
+            'warning',
+            'Zip: IIIF info.json fetch exception',
+            [
+              'media' => $media->getId(),
+              'uri' => $src,
+              'exception' => $e->getMessage(),
+            ]
+          );
+        }
+      }
+    }
+
+    if (!is_array($iiif) || !$iiif) {
+      return 0;
+    }
+
+    // Look for a service id in a few common places (simple heuristic).
+    $serviceIds = [];
+    if (isset($iiif['sequences']) && is_array($iiif['sequences'])) {
+      foreach ($iiif['sequences'] as $seq) {
+        if (!isset($seq['canvases']) || !is_array($seq['canvases'])) {
+          continue;
+        }
+        foreach ($seq['canvases'] as $canvas) {
+          if (isset($canvas['images']) && is_array($canvas['images'])) {
+            foreach ($canvas['images'] as $img) {
+              $svc = $img['resource']['service'] ?? NULL;
+              $id = is_string($svc) ? $svc : ($svc['@id'] ?? ($svc['id'] ?? NULL));
+              if ($id) {
+                $serviceIds[] = (string) $id;
+              }
             }
-            // Try next candidate.
           }
         }
-        // As a last resort, retry with SSL verification disabled (dev envs).
-        if (!$fetched) {
-          foreach ($candidates as $url) {
-            if (stripos($url, 'https://') !== 0) {
-              continue;
-            }
-            try {
-              $client->reset();
-              $client->setOptions([
-                'timeout' => 30,
-                'maxredirects' => 3,
-                'sslverifypeer' => FALSE,
-                'sslallowselfsigned' => TRUE,
-              ]);
-              $client->setHeaders([
-                'Accept' => 'image/jpeg,image/*;q=0.8,*/*;q=0.5',
-                'User-Agent' => 'Omeka-ZipDownload/1.0',
-              ]);
-              $response = $client->setUri($url)->setMethod('GET')->send();
-              if ($response->isOk()) {
-                $b = $response->getBody();
-                if ($b !== '' && $b !== NULL) {
-                  $body = $b;
-                  $ext = $this->guessImageExtension($url, $response->getHeaders()->get('Content-Type'));
-                  $fetched = TRUE;
-                  break;
+      }
+    }
+
+    // Simple IIIF v3 structure scan.
+    if (empty($serviceIds) && isset($iiif['items']) && is_array($iiif['items'])) {
+      foreach ($iiif['items'] as $canvas) {
+        if (isset($canvas['items']) && is_array($canvas['items'])) {
+          foreach ($canvas['items'] as $page) {
+            if (isset($page['items']) && is_array($page['items'])) {
+              foreach ($page['items'] as $anno) {
+                $svc = $anno['body']['service'] ?? NULL;
+                $id = is_string($svc) ? $svc : ($svc['@id'] ?? ($svc['id'] ?? NULL));
+                if ($id) {
+                  $serviceIds[] = (string) $id;
                 }
               }
             }
-            catch (\Throwable $e) {
-              // Ignore and continue.
+          }
+        }
+      }
+    }
+
+    if (empty($serviceIds)) {
+      // Last fallback: use media source if it looks like IIIF.
+      $src = (string) $media->getSource();
+      if ($src && (strpos($src, '/iiif/2/') !== FALSE || strpos($src, '/iiif/3/') !== FALSE)) {
+        $serviceIds[] = rtrim($src, '/');
+      }
+    }
+
+    $this->safeLog(
+      'info',
+      'Zip: IIIF service ids computed',
+      [
+        'media' => $media->getId(),
+        'serviceIds' => $serviceIds,
+      ]
+    );
+
+    if (empty($serviceIds)) {
+      return 0;
+    }
+
+    $added = 0;
+    foreach ($serviceIds as $idx => $serviceId) {
+      if (!$serviceId || !$client) {
+        $this->safeLog(
+          'info',
+          'Zip: skipping iiif service, no client or empty id',
+          [
+            'media' => $media->getId(),
+            'service' => $serviceId,
+          ]
+        );
+        continue;
+      }
+      $base = rtrim($serviceId, '/');
+      // If the service id points to an info.json, strip that suffix.
+      if (preg_match('@/info\\.json$@', $base)) {
+        $base = preg_replace('@/info\\.json$@', '', $base);
+      }
+      elseif (strpos($base, '/info.json') !== FALSE) {
+        $base = preg_replace('@/info\\.json.*$@', '', $base);
+      }
+      $this->safeLog(
+        'info',
+        'Zip: IIIF base computed',
+        [
+          'media' => $media->getId(),
+          'base' => $base,
+        ]
+      );
+      $candidates = [
+        $base . '/full/max/0/default.jpg',
+        $base . '/full/full/0/default.jpg',
+        $base . '/max/full/0/default.jpg',
+        $base . '/full/max/0/default.png',
+      ];
+
+      $fetched = FALSE;
+      $body = '';
+      $ext = '';
+      foreach ($candidates as $url) {
+        try {
+          $this->safeLog(
+            'info',
+            'Zip: IIIF try url',
+            [
+              'media' => $media->getId(),
+              'url' => $url,
+            ]
+          );
+          $client->reset();
+          $client->setOptions([
+            'timeout' => 25,
+            'maxredirects' => 3,
+          ]);
+          $client->setHeaders([
+            'Accept' => 'image/jpeg,image/*;q=0.8,*/*;q=0.5',
+            'User-Agent' => 'Omeka-ZipDownload/1.0',
+          ]);
+          $resp = $client->setUri($url)->setMethod('GET')->send();
+          $status = method_exists($resp, 'getStatusCode') ? $resp->getStatusCode() : (method_exists($resp, 'getStatus') ? $resp->getStatus() : NULL);
+          $this->safeLog(
+            'info',
+            'Zip: IIIF response',
+            [
+              'media' => $media->getId(),
+              'url' => $url,
+              'status' => $status,
+            ]
+          );
+          if ($resp->isOk()) {
+            $b = $resp->getBody();
+            $len = is_string($b) ? strlen($b) : 0;
+            $this->safeLog(
+              'info',
+              'Zip: IIIF body length',
+              [
+                'media' => $media->getId(),
+                'url' => $url,
+                'len' => $len,
+              ]
+            );
+            if ($b !== '' && $b !== NULL && $len > 0) {
+              $body = $b;
+              $contentType = NULL;
+              try {
+                $contentType = $resp->getHeaders()->get('Content-Type');
+              }
+              catch (\Throwable $e) {
+                $contentType = NULL;
+              }
+              $ext = $this->guessImageExtension($url, $contentType);
+              $fetched = TRUE;
+              break;
             }
           }
         }
-        if (!$fetched) {
-          continue;
+        catch (\Throwable $e) {
+          $this->safeLog(
+            'warning',
+            'Zip: IIIF fetch exception',
+            [
+              'media' => $media->getId(),
+              'url' => $url,
+              'exception' => $e->getMessage(),
+            ]
+          );
         }
-        $name = $titleBase . '_' . $this->sanitizeFilename($label ?: ('page-' . ($idx + 1))) . $ext;
-        $zip->addFromString($makeUnique($name), $body);
+      }
+      if (!$fetched) {
+        $this->safeLog(
+          'info',
+          'Zip: IIIF service yielded no image',
+          [
+            'media' => $media->getId(),
+            'service' => $serviceId,
+          ]
+        );
+        continue;
+      }
+      $name = $this->sanitizeFilename((string) $media->getItem()->getId() . '_page-' . ($idx + 1)) . $ext;
+      try {
+        $zip->addFile($makeUnique($name), $body);
+        $this->safeLog(
+          'info',
+          'Zip: added IIIF file to zip',
+          [
+            'media' => $media->getId(),
+            'name' => $name,
+            'bytes' => is_string($body) ? strlen($body) : 0,
+          ]
+        );
         $added++;
       }
       catch (\Throwable $e) {
-        if ($this->logger) {
-          $this->logger->notice('IIIF fetch failed: ' . $e->getMessage());
-        }
+        $this->safeLog(
+          'warning',
+          'Zip: add IIIF file failed',
+          [
+            'media' => $media->getId(),
+            'name' => $name,
+            'exception' => $e->getMessage(),
+          ]
+        );
       }
     }
 
@@ -869,321 +748,223 @@ class ZipController extends AbstractActionController {
   }
 
   /**
-   * Extract image entries (URL + label) from IIIF v2/v3 JSON.
-   *
-   * @param array $iiif
-   *   IIIF Presentation JSON.
-   *
-   * @return array<int,array{candidates:array,label:string}>
-   *   List of image entries with candidate URLs and a label.
+   * Read progress data for a token from a temp file.
    */
-  private function extractIiifImageEntries(array $iiif): array {
-    $entries = [];
-    $context = (string) ($iiif['@context'] ?? '');
-
-    if (strpos($context, '/presentation/2/') !== FALSE) {
-      // v2: sequences[0].canvases[].images[0].resource{ @id, service{@id} }.
-      $seqs = $iiif['sequences'] ?? [];
-      $canvases = $seqs[0]['canvases'] ?? [];
-      foreach ($canvases as $i => $canvas) {
-        $label = (string) ($canvas['label'] ?? (string) ($i + 1));
-        $image = $canvas['images'][0] ?? NULL;
-        if (!$image) {
-          continue;
-        }
-        $resource = $image['resource'] ?? [];
-        $direct = (string) ($resource['@id'] ?? '');
-        $service = $resource['service'] ?? [];
-        $serviceId = '';
-        if (is_array($service)) {
-          $serviceId = (string) ($service['@id'] ?? $service['id'] ?? '');
-        }
-        $w = (int) ($resource['width'] ?? ($canvas['width'] ?? 0));
-        $h = (int) ($resource['height'] ?? ($canvas['height'] ?? 0));
-        $cands = $this->bestIiifImageCandidates($serviceId, $direct, $w, $h);
-        if ($cands) {
-          $entries[] = [
-            'candidates' => $cands,
-            'label' => (string) $label,
-            'serviceId' => (string) $serviceId,
-            'directId' => (string) $direct,
-            'width' => $w,
-            'height' => $h,
-          ];
-        }
-      }
+  private function readProgress(string $token): array {
+    $file = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'zipdownload_progress_' . preg_replace('/[^a-zA-Z0-9_-]/', '_', $token) . '.json';
+    if (!is_file($file)) {
+      return [];
     }
-    else {
-      // v3: items[].items[0].items[0].body{ id, service[{id}] }.
-      $canvases = $iiif['items'] ?? [];
-      foreach ($canvases as $i => $canvas) {
-        $label = '';
-        $labelVal = $canvas['label'] ?? '';
-        if (is_string($labelVal)) {
-          $label = $labelVal;
-        }
-        elseif (is_array($labelVal)) {
-          // Prefer "none" language.
-          if (isset($labelVal['none']) && is_array($labelVal['none']) && !empty($labelVal['none'][0])) {
-            $label = (string) $labelVal['none'][0];
-          }
-          else {
-            // Use first value of the first language key.
-            $keys = array_keys($labelVal);
-            if ($keys && isset($labelVal[$keys[0]]) && is_array($labelVal[$keys[0]]) && !empty($labelVal[$keys[0]][0])) {
-              $label = (string) $labelVal[$keys[0]][0];
-            }
-          }
-        }
-        if ($label === '') {
-          $label = (string) ($i + 1);
-        }
-        $annos = $canvas['items'][0]['items'][0] ?? NULL;
-        if (!$annos) {
-          continue;
-        }
-        $body = $annos['body'] ?? NULL;
-        if (!$body) {
-          continue;
-        }
-        if (isset($body['id']) || isset($body['service'])) {
-          $direct = (string) ($body['id'] ?? '');
-          $svc = $body['service'] ?? [];
-          $serviceId = '';
-          if (is_array($svc)) {
-            // Could be array or object.
-            if (isset($svc[0]) && is_array($svc[0])) {
-              $serviceId = (string) ($svc[0]['id'] ?? $svc[0]['@id'] ?? '');
-            }
-            elseif (isset($svc['id']) || isset($svc['@id'])) {
-              $serviceId = (string) ($svc['id'] ?? $svc['@id'] ?? '');
-            }
-          }
-          $w = (int) ($body['width'] ?? ($canvas['width'] ?? 0));
-          $h = (int) ($body['height'] ?? ($canvas['height'] ?? 0));
-          $cands = $this->bestIiifImageCandidates($serviceId, $direct, $w, $h);
-          if ($cands) {
-            $entries[] = [
-              'candidates' => $cands,
-              'label' => (string) $label,
-              'serviceId' => (string) $serviceId,
-              'directId' => (string) $direct,
-              'width' => $w,
-              'height' => $h,
-            ];
-          }
-        }
-      }
+    $data = @file_get_contents($file);
+    if ($data === FALSE) {
+      return [];
     }
-
-    return $entries;
+    $json = @json_decode($data, TRUE);
+    return is_array($json) ? $json : [];
   }
 
   /**
-   * Extract the Image API identifier from a IIIF URL.
-   *
-   * Examples:
-   *  - https://host/iiif/3/identifier/full/max/0/default.jpg -> identifier
-   *  - https://host/iiif/2/identifier/info.json -> identifier
-   *  - https://host/iiif/3/identifier.ext -> identifier (extension stripped)
+   * Write progress data for a token to a temp file.
    */
-  private function iiifIdentifierFromUrl(string $url): string {
-    $path = (string) parse_url($url, PHP_URL_PATH);
-    if ($path === '') {
-      return '';
-    }
-    $parts = explode('/', trim($path, '/'));
-    $i = array_search('iiif', $parts, TRUE);
-    if ($i === FALSE || !isset($parts[$i + 2])) {
-      // Not a typical /iiif/{ver}/{identifier} path.
-      // Fall back to last segment.
-      $last = end($parts) ?: '';
-      $dot = strrpos($last, '.');
-      return $dot !== FALSE ? substr($last, 0, $dot) : $last;
-    }
-    $identifier = $parts[$i + 2];
-    // Strip trailing transform segments like 'info.json'.
-    $dot = strrpos($identifier, '.');
-    if ($dot !== FALSE) {
-      $identifier = substr($identifier, 0, $dot);
-    }
-    return $identifier;
+  private function writeProgress(string $token, array $data): void {
+    $file = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'zipdownload_progress_' . preg_replace('/[^a-zA-Z0-9_-]/', '_', $token) . '.json';
+    @file_put_contents($file, json_encode($data));
   }
 
   /**
-   * Build the best IIIF Image URL from service id and direct image URL.
+   * Determine an image file extension from a URL or content-type.
    */
-  private function bestIiifImageCandidates(string $serviceId, string $direct, int $width = 0, int $height = 0): array {
-    $candidates = [];
-    if ($serviceId !== '') {
-      $serviceId = rtrim($serviceId, '/');
-      // Try both full and max variants (some servers only accept one).
-      $candidates[] = $serviceId . '/full/max/0/default.jpg';
-      $candidates[] = $serviceId . '/full/full/0/default.jpg';
-      $candidates[] = $serviceId . '/full/max/0/color.jpg';
-      $candidates[] = $serviceId . '/full/full/0/color.jpg';
-      // Also try explicit pixel size using "max" shortcut (some impls differ).
-      $candidates[] = $serviceId . '/max/full/0/default.jpg';
-      // Some servers support png only for huge images; try png as well.
-      $candidates[] = $serviceId . '/full/max/0/default.png';
-      // Try percentage based size (some servers prefer pct:100 as full scale).
-      $candidates[] = $serviceId . '/full/pct:100/0/default.jpg';
-      $candidates[] = $serviceId . '/full/pct:100/0/color.jpg';
-      if ($width > 0) {
-        $candidates[] = $serviceId . '/full/' . $width . ',/0/default.jpg';
-        $candidates[] = $serviceId . '/full/!' . $width . ',' . ($height > 0 ? $height : $width) . '/0/default.jpg';
-      }
-      if ($height > 0) {
-        $candidates[] = $serviceId . '/full/,' . $height . '/0/default.jpg';
-      }
+  private function guessImageExtension(string $url, $contentType = NULL): string {
+    $ext = '';
+    if (is_array($contentType)) {
+      $contentType = reset($contentType);
     }
-    if ($direct !== '') {
-      $candidates[] = $direct;
-      // If direct looks like an Image API identifier, try building Image API
-      // URLs directly from it (identifier may include dots or extensions).
-      $directBase = rtrim($direct, '/');
-      $candidates[] = $directBase . '/full/max/0/default.jpg';
-      $candidates[] = $directBase . '/full/full/0/default.jpg';
-      $candidates[] = $directBase . '/full/max/0/color.jpg';
-      $candidates[] = $directBase . '/full/full/0/color.jpg';
-      $candidates[] = $directBase . '/max/full/0/default.jpg';
-      $candidates[] = $directBase . '/full/max/0/default.png';
-      $candidates[] = $directBase . '/full/pct:100/0/default.jpg';
-      $candidates[] = $directBase . '/full/pct:100/0/color.jpg';
-      if ($width > 0) {
-        $candidates[] = $directBase . '/full/' . $width . ',/0/default.jpg';
-        $candidates[] = $directBase . '/full/!' . $width . ',' . ($height > 0 ? $height : $width) . '/0/default.jpg';
-      }
-      if ($height > 0) {
-        $candidates[] = $directBase . '/full/,' . $height . '/0/default.jpg';
-      }
-      // As an extra fallback, if the last path segment ends with an extension,
-      // also try stripping it and building standard Image API URLs.
-      $parsed = @parse_url($direct);
-      $path = is_array($parsed) ? (string) ($parsed['path'] ?? '') : '';
-      if ($path !== '' && (strpos($path, '/iiif/2/') !== FALSE || strpos($path, '/iiif/3/') !== FALSE)) {
-        $segments = explode('/', trim($path, '/'));
-        // Last segment may be identifier with extension, e.g., foo_1.tif.
-        $last = end($segments) ?: '';
-        if ($last !== '') {
-          $dot = strrpos($last, '.');
-          if ($dot !== FALSE) {
-            $idNoExt = substr($last, 0, $dot);
-            if ($idNoExt !== '') {
-              $segments[count($segments) - 1] = $idNoExt;
-              $schemeHost = '';
-              if (is_array($parsed)) {
-                $scheme = (string) ($parsed['scheme'] ?? '');
-                $host = (string) ($parsed['host'] ?? '');
-                $port = isset($parsed['port']) ? (':' . (string) $parsed['port']) : '';
-                $schemeHost = ($scheme !== '' && $host !== '') ? ($scheme . '://' . $host . $port) : '';
-              }
-              $serviceBase = ($schemeHost !== '' ? $schemeHost : '') . '/' . implode('/', $segments);
-              $serviceBase = rtrim($serviceBase, '/');
-              $candidates[] = $serviceBase . '/full/max/0/default.jpg';
-              $candidates[] = $serviceBase . '/full/full/0/default.jpg';
-              $candidates[] = $serviceBase . '/max/full/0/default.jpg';
-              $candidates[] = $serviceBase . '/full/max/0/default.png';
-              $candidates[] = $serviceBase . '/full/pct:100/0/default.jpg';
-              $candidates[] = $serviceBase . '/full/pct:100/0/color.jpg';
-              if ($width > 0) {
-                $candidates[] = $serviceBase . '/full/' . $width . ',/0/default.jpg';
-                $candidates[] = $serviceBase . '/full/!' . $width . ',' . ($height > 0 ? $height : $width) . '/0/default.jpg';
-              }
-              if ($height > 0) {
-                $candidates[] = $serviceBase . '/full/,' . $height . '/0/default.jpg';
-              }
-            }
-          }
-        }
-      }
-    }
-    // Deduplicate while preserving order.
-    $seen = [];
-    $unique = [];
-    foreach ($candidates as $u) {
-      if (!isset($seen[$u])) {
-        $seen[$u] = TRUE;
-        $unique[] = $u;
-      }
-    }
-    return $unique;
-  }
-
-  /**
-   * Guess file extension from URL path or Content-Type header.
-   */
-  private function guessImageExtension(string $url, $contentTypeHeader): string {
-    $path = (string) parse_url($url, PHP_URL_PATH);
-    $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
-    if ($ext === '') {
-      $ct = '';
-      try {
-        $ct = (string) ($contentTypeHeader ? $contentTypeHeader->getFieldValue() : '');
-      }
-      catch (\Throwable $e) {
-        $ct = '';
-      }
-      if (strpos($ct, 'image/jpeg') !== FALSE) {
+    $ct = is_string($contentType) ? strtolower($contentType) : '';
+    if ($ct !== '') {
+      if (strpos($ct, 'jpeg') !== FALSE || strpos($ct, 'jpg') !== FALSE) {
         return '.jpg';
       }
-      if (strpos($ct, 'image/jp2') !== FALSE) {
-        return '.jp2';
-      }
-      if (strpos($ct, 'image/png') !== FALSE) {
+      if (strpos($ct, 'png') !== FALSE) {
         return '.png';
       }
-      if (strpos($ct, 'image/tiff') !== FALSE || strpos($ct, 'image/tif') !== FALSE) {
-        return '.tif';
+      if (strpos($ct, 'gif') !== FALSE) {
+        return '.gif';
       }
-      return '.img';
     }
-    // Normalize common extensions.
-    if ($ext === 'jpeg') {
-      return '.jpg';
+    if (preg_match('/\\.([a-z0-9]+)(?:\?|$)/i', $url, $m)) {
+      $ext = '.' . strtolower($m[1]);
     }
-    if ($ext === 'tiff') {
-      return '.tif';
-    }
-    return '.' . $ext;
+    return $ext;
   }
 
   /**
-   * Sanitize a filename component.
+   * Simple safe logger wrapper to avoid method-not-found failures.
+   */
+  private function safeLog(string $level, string $message, array $context = []): void {
+    if (!$this->logger) {
+      return;
+    }
+    try {
+      if (method_exists($this->logger, $level)) {
+        $this->logger->{$level}($message, $context);
+        return;
+      }
+      // Fallbacks: try common names.
+      if ($level === 'warning' && method_exists($this->logger, 'warn')) {
+        $this->logger->warn($message, $context);
+        return;
+      }
+      if (method_exists($this->logger, 'log')) {
+        $this->logger->log($level, $message, $context);
+        return;
+      }
+    }
+    catch (\Throwable $e) {
+      // Ignore logging problems during debug.
+    }
+  }
+
+  /**
+   * Sanitize a string into a safe filename.
    */
   private function sanitizeFilename(string $name): string {
-    $name = trim($name);
-    if ($name === '') {
-      return 'file';
-    }
-    $replMap = [
-      "\\" => '_',
-      "/" => '_',
-      ":" => '_',
-      "*" => '_',
-      "?" => '_',
-      '"' => '_',
-      "<" => '_',
-      ">" => '_',
-      "|" => '_',
-    ];
-    return strtr($name, $replMap);
+    $map = ["\\" => '_', '/' => '_', ':' => '_', '*' => '_', '?' => '_', '"' => '_', '<' => '_', '>' => '_', '|' => '_'];
+    $s = strtr($name, $map);
+    $s = preg_replace('/[^\\w\\-\\._ ]+/', '', $s);
+    $s = trim($s);
+    return $s !== '' ? $s : 'file';
   }
 
   /**
-   * Build a JSON error response with http status code.
+   * Send a JSON error response and exit.
    */
-  private function jsonError(int $status, string $message): HttpResponse {
-    $response = new HttpResponse();
-    $response->setStatusCode($status);
-    $response->getHeaders()->addHeaderLine('Content-Type', 'application/json; charset=utf-8');
-    // Provide a trace header for easier debugging even on error responses.
-    $response->getHeaders()->addHeaderLine('X-Zip-Trace', 'ZipController:jsonError');
-    $response->getHeaders()->addHeaderLine('X-Zip-Error', $message);
-    $response->setContent(json_encode([
-      'error' => $message,
-    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
-    return $response;
+  private function jsonError(int $status, string $message) {
+    header('Content-Type: application/json', TRUE, $status);
+    echo json_encode(['error' => $message]);
+    exit;
+  }
+
+  /**
+   * Return progress JSON for a given token.
+   *
+   * GET /zip-download/status?token=TOKEN.
+   */
+  public function statusAction() {
+    $token = (string) $this->params()->fromQuery('token', '');
+    if ($token === '') {
+      return $this->jsonError(400, 'Missing token');
+    }
+    $data = $this->readProgress($token);
+    header('Content-Type: application/json');
+    echo json_encode($data ?: ['status' => 'unknown']);
+    exit;
+  }
+
+  /**
+   * Estimate total bytes for a set of media ids.
+   *
+   * Accepts POST/GET media_ids (csv or array).
+   * POST /zip-download/estimate?item=:id.
+   */
+  public function estimateAction() {
+    $mediaIds = $this->params()->fromPost('media_ids', $this->params()->fromQuery('media_ids', []));
+    if (is_string($mediaIds)) {
+      $mediaIds = array_filter(array_map('intval', explode(',', $mediaIds)));
+    }
+    elseif (!is_array($mediaIds)) {
+      $mediaIds = [];
+    }
+    if (!$mediaIds) {
+      return $this->jsonError(400, 'No media selected');
+    }
+    $repo = $this->em->getRepository(Media::class);
+    $services = $this->getEvent()->getApplication()->getServiceManager();
+    try {
+      $store = $services->get('Omeka\\File\\Store');
+    }
+    catch (\Throwable $e) {
+      $store = NULL;
+    }
+
+    $httpClient = NULL;
+    try {
+      $httpClient = $services->get('Omeka\\HttpClient');
+    }
+    catch (\Throwable $e) {
+      $httpClient = NULL;
+    }
+
+    $total = 0;
+    $fileCount = 0;
+    foreach ($mediaIds as $mid) {
+      $m = $repo->find($mid);
+      if (!$m) {
+        continue;
+      }
+      $fileCount++;
+      // Prefer stored size if available in metadata.
+      $size = 0;
+      try {
+        $data = $m->getData();
+        if (is_array($data) && isset($data['file_size'])) {
+          $size = (int) $data['file_size'];
+        }
+      }
+      catch (\Throwable $e) {
+        $size = 0;
+      }
+
+      // If has original, try filesystem size.
+      if ($size === 0 && $m->hasOriginal() && $store) {
+        $ext = method_exists($m, 'getExtension') ? (string) $m->getExtension() : '';
+        $ext = $ext !== '' ? ('.' . ltrim($ext, '.')) : '';
+        $originalStoragePath = sprintf('original/%s%s', $m->getStorageId(), $ext);
+        if (method_exists($store, 'getLocalPath')) {
+          $candidatePath = $store->getLocalPath($originalStoragePath);
+          if ($candidatePath && is_file($candidatePath)) {
+            $size = filesize($candidatePath);
+          }
+        }
+      }
+
+      // If still unknown, try IIIF HEAD to get Content-Length when possible.
+      if ($size === 0) {
+        $src = (string) $m->getSource();
+        if ($src && $httpClient && (strpos($src, '/iiif/') !== FALSE || strpos($src, '/info.json') !== FALSE)) {
+          try {
+            $httpClient->reset();
+            $httpClient->setOptions(['timeout' => 5, 'maxredirects' => 2]);
+            // Attempt HEAD on a likely image resource.
+            $candidate = rtrim($src, '/') . '/full/max/0/default.jpg';
+            $resp = $httpClient->setUri($candidate)->setMethod('HEAD')->send();
+            if (method_exists($resp, 'isOk') && $resp->isOk()) {
+              $cl = NULL;
+              try {
+                $cl = $resp->getHeaders()->get('Content-Length');
+              }
+              catch (\Throwable $e) {
+                $cl = NULL;
+              }
+              if ($cl) {
+                $size = (int) $cl;
+              }
+            }
+          }
+          catch (\Throwable $e) {
+            // Ignore network errors. Fallback to default below.
+          }
+        }
+      }
+
+      // Fallback default estimate for unknown: 2MB per file.
+      if ($size <= 0) {
+        $size = 2000000;
+      }
+      $total += $size;
+    }
+    header('Content-Type: application/json');
+    echo json_encode(['total_bytes' => $total, 'total_files' => $fileCount]);
+    exit;
   }
 
 }
