@@ -208,8 +208,11 @@ class ZipController extends AbstractActionController {
     // Check limits: concurrent downloads and total bytes.
     if ($activeCount >= $this->maxConcurrentDownloadsGlobal) {
       header('Content-Type: application/json', TRUE, 429);
+      $msg = $this->currentLocaleIsJa()
+        ? 'すべてのダウンロード枠が使用中です。少し待ってからもう一度お試しください。'
+        : 'All download slots are currently in use. Please wait a moment and try again.';
       echo json_encode([
-        'error' => 'All download slots are currently in use. Please wait a moment and try again.',
+        'error' => $msg,
         'retry_after' => 60,
       ]);
       exit;
@@ -217,22 +220,28 @@ class ZipController extends AbstractActionController {
     if ($requestedEstimate > $this->maxBytesPerDownload) {
       header('Content-Type: application/json', TRUE, 413);
       echo json_encode([
-        'error' => 'Requested download too large',
+        'error' => $this->translateMessage('Requested download too large'),
         'max_bytes_per_download' => $this->maxBytesPerDownload,
       ]);
       exit;
     }
     if (($activeBytes + $requestedEstimate) > $this->maxTotalActiveBytes) {
       header('Content-Type: application/json', TRUE, 429);
+      $msg = $this->currentLocaleIsJa()
+        ? 'サーバーが他の大きなダウンロードを処理中です。少し待ってからもう一度お試しください。'
+        : 'The server is handling other large downloads. Please wait a moment and try again.';
       echo json_encode([
-        'error' => 'The server is handling other large downloads. Please wait a moment and try again.',
+        'error' => $msg,
         'retry_after' => 60,
       ]);
       exit;
     }
     if ($requestedFileCount > $this->maxFilesPerDownload) {
       header('Content-Type: application/json', TRUE, 413);
-      echo json_encode(['error' => 'Too many files requested', 'max_files_per_download' => $this->maxFilesPerDownload]);
+      echo json_encode([
+        'error' => $this->translateMessage('Too many files requested'),
+        'max_files_per_download' => $this->maxFilesPerDownload,
+      ]);
       exit;
     }
 
@@ -908,6 +917,58 @@ class ZipController extends AbstractActionController {
   }
 
   /**
+   * Translate fixed error messages (EN -> JA) when site locale is Japanese.
+   */
+  private function translateMessage(string $message): string {
+    if (!$this->currentLocaleIsJa()) {
+      return $message;
+    }
+    static $map = [
+      'No media selected' => 'メディアが選択されていません',
+      'No accessible media' => 'アクセス可能なメディアがありません',
+      'Requested download too large' => '要求されたダウンロードのサイズが大きすぎます',
+      'Too many files requested' => '要求されたファイル数が多すぎます',
+      'Missing token' => 'トークンが指定されていません',
+      'Token not found' => 'トークンが見つかりません',
+    ];
+    return $map[$message] ?? $message;
+  }
+
+  /**
+   * Determine if current locale is Japanese without relying on ext/intl.
+   */
+  private function currentLocaleIsJa(): bool {
+    try {
+      $services = $this->getEvent()->getApplication()->getServiceManager();
+      try {
+        $translator = $services->get('MvcTranslator');
+        if ($translator && method_exists($translator, 'getLocale')) {
+          $loc = (string) $translator->getLocale();
+          $loc = strtolower($loc);
+          if ($loc === 'ja' || strpos($loc, 'ja_') === 0) {
+            return TRUE;
+          }
+        }
+      }
+      catch (\Throwable $e) {
+      }
+      try {
+        $settings = $services->get('Omeka\\Settings');
+        $loc = (string) $settings->get('locale');
+        $loc = strtolower($loc);
+        if ($loc === 'ja' || strpos($loc, 'ja_') === 0) {
+          return TRUE;
+        }
+      }
+      catch (\Throwable $e) {
+      }
+    }
+    catch (\Throwable $e) {
+    }
+    return FALSE;
+  }
+
+  /**
    * Simple safe logger wrapper to avoid method-not-found failures.
    */
   private function safeLog(string $level, string $message, array $context = []): void {
@@ -950,7 +1011,7 @@ class ZipController extends AbstractActionController {
    */
   private function jsonError(int $status, string $message) {
     header('Content-Type: application/json', TRUE, $status);
-    echo json_encode(['error' => $message]);
+    echo json_encode(['error' => $this->translateMessage($message)]);
     exit;
   }
 

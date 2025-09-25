@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.4 (2025-09-26)
+
+- i18n: Localize server messages to Japanese when the site locale is set to JA, without relying on ext/intl.
+	- Localized 429 errors (download slots busy, total active bytes exceeded).
+	- Localized 413 errors (requested size too large, too many files).
+	- Localized common jsonError messages (e.g., "No media selected", "Missing token", "Token not found").
+	- Added lightweight helpers: `currentLocaleIsJa()` and `translateMessage()`.
+	- JSON schema unchanged (keys are stable: `error`, `retry_after`, etc.).
+
 ## 0.2.3 (2025-09-26)
 
 - Endpoints: Add explicit `POST /zip-download/cancel` entry to docs and wire up site-scoped routes (`/s/:site-slug/zip-download/...`) so site context works consistently.
