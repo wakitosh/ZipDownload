@@ -29,6 +29,43 @@ class ZipController extends AbstractActionController {
   private const PROGRESS_TOKEN_TTL = 7200;
 
   /**
+   * Runtime values (can be overridden from module settings).
+   */
+  /**
+   * Maximum concurrent downloads allowed globally.
+   *
+   * @var int
+   */
+  private $maxConcurrentDownloadsGlobal;
+  /**
+   * Maximum bytes allowed per single download.
+   *
+   * @var int
+   */
+  private $maxBytesPerDownload;
+
+  /**
+   * Maximum total active bytes across running downloads.
+   *
+   * @var int
+   */
+  private $maxTotalActiveBytes;
+
+  /**
+   * Maximum number of files permitted per download.
+   *
+   * @var int
+   */
+  private $maxFilesPerDownload;
+
+  /**
+   * Progress token time-to-live in seconds.
+   *
+   * @var int
+   */
+  private $progressTokenTtl;
+
+  /**
    * Doctrine ORM entity manager.
    *
    * @var \Doctrine\ORM\EntityManager
@@ -53,6 +90,28 @@ class ZipController extends AbstractActionController {
     $this->em = $entityManager;
     $this->logger = $container->get('Omeka\\Logger');
     $this->tempDir = sys_get_temp_dir();
+    // Load runtime settings from Omeka settings service when available.
+    $defaults = [
+      'max_concurrent_downloads_global' => self::MAX_CONCURRENT_DOWNLOADS_GLOBAL,
+      'max_bytes_per_download' => self::MAX_BYTES_PER_DOWNLOAD,
+      'max_total_active_bytes' => self::MAX_TOTAL_ACTIVE_BYTES,
+      'max_files_per_download' => self::MAX_FILES_PER_DOWNLOAD,
+      'progress_token_ttl' => self::PROGRESS_TOKEN_TTL,
+    ];
+    $settings = NULL;
+    if ($container->has('Omeka\\Settings')) {
+      try {
+        $settings = $container->get('Omeka\\Settings');
+      }
+      catch (\Throwable $e) {
+        $settings = NULL;
+      }
+    }
+    $this->maxConcurrentDownloadsGlobal = $settings ? max(0, (int) $settings->get('zipdownload.max_concurrent_downloads_global', $defaults['max_concurrent_downloads_global'])) : $defaults['max_concurrent_downloads_global'];
+    $this->maxBytesPerDownload = $settings ? max(0, (int) $settings->get('zipdownload.max_bytes_per_download', $defaults['max_bytes_per_download'])) : $defaults['max_bytes_per_download'];
+    $this->maxTotalActiveBytes = $settings ? max(0, (int) $settings->get('zipdownload.max_total_active_bytes', $defaults['max_total_active_bytes'])) : $defaults['max_total_active_bytes'];
+    $this->maxFilesPerDownload = $settings ? max(1, (int) $settings->get('zipdownload.max_files_per_download', $defaults['max_files_per_download'])) : $defaults['max_files_per_download'];
+    $this->progressTokenTtl = $settings ? max(60, (int) $settings->get('zipdownload.progress_token_ttl', $defaults['progress_token_ttl'])) : $defaults['progress_token_ttl'];
   }
 
   /**
@@ -75,7 +134,7 @@ class ZipController extends AbstractActionController {
       }
       $data = @json_decode(@file_get_contents($f), TRUE) ?: [];
       $ts = @filemtime($f) ?: 0;
-      if ($ts > 0 && ($now - $ts) > self::PROGRESS_TOKEN_TTL) {
+      if ($ts > 0 && ($now - $ts) > $this->progressTokenTtl) {
         @unlink($f);
         continue;
       }
@@ -147,27 +206,33 @@ class ZipController extends AbstractActionController {
     }
 
     // Check limits: concurrent downloads and total bytes.
-    if ($activeCount >= self::MAX_CONCURRENT_DOWNLOADS_GLOBAL) {
+    if ($activeCount >= $this->maxConcurrentDownloadsGlobal) {
       header('Content-Type: application/json', TRUE, 429);
-      echo json_encode(['error' => 'Too many concurrent downloads', 'retry_after' => 60]);
-      exit;
-    }
-    if ($requestedEstimate > self::MAX_BYTES_PER_DOWNLOAD) {
-      header('Content-Type: application/json', TRUE, 413);
       echo json_encode([
-        'error' => 'Requested download too large',
-        'max_bytes_per_download' => self::MAX_BYTES_PER_DOWNLOAD,
+        'error' => 'All download slots are currently in use. Please wait a moment and try again.',
+        'retry_after' => 60,
       ]);
       exit;
     }
-    if (($activeBytes + $requestedEstimate) > self::MAX_TOTAL_ACTIVE_BYTES) {
-      header('Content-Type: application/json', TRUE, 429);
-      echo json_encode(['error' => 'Server busy: total active bytes limit reached', 'retry_after' => 60]);
+    if ($requestedEstimate > $this->maxBytesPerDownload) {
+      header('Content-Type: application/json', TRUE, 413);
+      echo json_encode([
+        'error' => 'Requested download too large',
+        'max_bytes_per_download' => $this->maxBytesPerDownload,
+      ]);
       exit;
     }
-    if ($requestedFileCount > self::MAX_FILES_PER_DOWNLOAD) {
+    if (($activeBytes + $requestedEstimate) > $this->maxTotalActiveBytes) {
+      header('Content-Type: application/json', TRUE, 429);
+      echo json_encode([
+        'error' => 'The server is handling other large downloads. Please wait a moment and try again.',
+        'retry_after' => 60,
+      ]);
+      exit;
+    }
+    if ($requestedFileCount > $this->maxFilesPerDownload) {
       header('Content-Type: application/json', TRUE, 413);
-      echo json_encode(['error' => 'Too many files requested', 'max_files_per_download' => self::MAX_FILES_PER_DOWNLOAD]);
+      echo json_encode(['error' => 'Too many files requested', 'max_files_per_download' => $this->maxFilesPerDownload]);
       exit;
     }
 

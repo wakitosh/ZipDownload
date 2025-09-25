@@ -11,6 +11,8 @@ namespace ZipDownload;
 
 use Laminas\Router\Http\Segment;
 use ZipDownload\Controller\ZipController;
+use Laminas\ServiceManager\Factory\InvokableFactory;
+use ZipDownload\Form\ConfigForm;
 
 return [
   'controllers' => [
@@ -21,6 +23,11 @@ return [
                     $container
                 );
       },
+    ],
+  ],
+  'form_elements' => [
+    'factories' => [
+      ConfigForm::class => InvokableFactory::class,
     ],
   ],
   'router' => [

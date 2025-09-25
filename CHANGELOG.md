@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2 (2025-09-25)
+
+- Feature: Admin settings now accept human-friendly byte sizes for limits (e.g., 512M, 1G, 10G); also supports K/KB, M/MB, G/GB, T/TB.
+- UX: Updated labels/placeholders in the settings form to indicate supported size suffixes.
+- Dev: Fixed and normalized ConfigForm indentation/array alignment to satisfy linter.
+
 ## 0.2.1 (2025-09-25)
 
 - Fix: Ensure client cancel reliably marks progress token as canceled and prevents accidental fallback to individual downloads.
