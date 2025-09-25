@@ -7,13 +7,17 @@
  - Streams ZIP files on-demand using ZipStream-PHP (bundled in module vendor).
  - Prefers IIIF-rendered images if available, then local original files, then large thumbnails.
  - Provides server-side progress via a per-download token and temp-file JSON records.
- - Conservative server-side limits to avoid overloading memory/IO-heavy services.
+ - Conservative server-side limits to avoid overloading memory/IO-heavy services, configurable from the module settings (admin UI). Human-friendly byte sizes like 512M/1G/10G are accepted.
 
  ## Endpoints
 
  - POST /zip-download/item/:id — start streaming a ZIP for item `:id` (POST `media_ids`, `progress_token`, optional `estimated_total_bytes`/`estimated_file_count`).
  - GET /zip-download/status?token=TOKEN — read progress JSON for token.
  - POST/GET /zip-download/estimate — best-effort estimate of `total_bytes` and `total_files` for given `media_ids`.
+ - POST /zip-download/cancel — cancel a running ZIP build (`progress_token` required).
+
+Notes:
+- Site-scoped routes such as `/s/:site-slug/zip-download/...` are also available for Omeka S site contexts.
 
  ## Usage
 
@@ -38,7 +42,7 @@
 
  ## Server-side limits and tuning
 
- The module sets conservative defaults to avoid overloading typical production instances (config in `ZipController`):
+ The module sets conservative defaults to avoid overloading typical production instances (config in `ZipController`, overridable via admin settings):
 
  - `MAX_CONCURRENT_DOWNLOADS_GLOBAL` = 1
  - `MAX_BYTES_PER_DOWNLOAD` = 3GB
@@ -46,7 +50,7 @@
  - `MAX_FILES_PER_DOWNLOAD` = 1000
  - `PROGRESS_TOKEN_TTL` = 7200 (seconds)
 
- Adjust these constants inside `modules/ZipDownload/src/Controller/ZipController.php` to match your server capacity.
+ You can adjust these from the ZipDownload module settings page. For byte limits, you may enter human-friendly values like `512M`, `1G`, or `10G` (K/KB, M/MB, G/GB, T/TB are supported). If you prefer code-level defaults, you may also edit `modules/ZipDownload/src/Controller/ZipController.php`.
 
  ## Notes and caveats
 
