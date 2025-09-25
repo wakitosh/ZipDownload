@@ -306,6 +306,25 @@ class ZipController extends AbstractActionController {
 
     foreach ($medias as $media) {
       try {
+        // Check for client-requested cancel before each media.
+        if ($progressToken) {
+          $metaCheck = $this->readProgress($progressToken);
+          if (isset($metaCheck['status']) && $metaCheck['status'] === 'canceled') {
+            // Preserve bytes_sent and mark canceled_at.
+            $this->writeProgress(
+              $progressToken,
+              [
+                'status' => 'canceled',
+                'bytes_sent' => $bytesSent,
+                'total_bytes' => $totalBytesEstimate,
+                'started_at' => $startedAt,
+                'canceled_at' => time(),
+              ]
+            );
+            // Stop processing further files.
+            break;
+          }
+        }
         $localPath = NULL;
         $zipName = NULL;
 
@@ -440,15 +459,16 @@ class ZipController extends AbstractActionController {
 
     if ($this->logger) {
       try {
-        $this->logger->info(
-        'Zip done: item={item} added={total} (orig={orig}, iiif={iiif}, thumb={thumb})',
-        [
-          'item' => $id,
-          'total' => $addedTotal,
-          'orig' => $addedOrig,
-          'iiif' => $addedIiif,
-          'thumb' => $addedThumb,
-        ]
+        $this->safeLog(
+          'info',
+          'Zip done: item={item} added={total} (orig={orig}, iiif={iiif}, thumb={thumb})',
+          [
+            'item' => $id,
+            'total' => $addedTotal,
+            'orig' => $addedOrig,
+            'iiif' => $addedIiif,
+            'thumb' => $addedThumb,
+          ]
         );
       }
       catch (\Throwable $e) {
@@ -768,7 +788,32 @@ class ZipController extends AbstractActionController {
    */
   private function writeProgress(string $token, array $data): void {
     $file = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'zipdownload_progress_' . preg_replace('/[^a-zA-Z0-9_-]/', '_', $token) . '.json';
-    @file_put_contents($file, json_encode($data));
+    $tmp = $file . '.tmp';
+    // Use an exclusive lock and avoid overwriting if the existing status is
+    // already 'canceled' to prevent races between client cancel and server
+    // progress updates.
+    $existing = [];
+    if (is_file($file) && is_readable($file)) {
+      $contents = @file_get_contents($file);
+      $existing = @json_decode($contents, TRUE) ?: [];
+    }
+    if (isset($existing['status']) && $existing['status'] === 'canceled') {
+      // Preserve canceled state; merge only non-status fields if absent.
+      $data = array_merge($existing, $data);
+      $data['status'] = 'canceled';
+    }
+    $json = json_encode($data);
+    // Write atomically with locking.
+    $fp = @fopen($tmp, 'wb');
+    if ($fp) {
+      if (@flock($fp, LOCK_EX)) {
+        @fwrite($fp, $json);
+        @fflush($fp);
+        @flock($fp, LOCK_UN);
+      }
+      @fclose($fp);
+      @rename($tmp, $file);
+    }
   }
 
   /**
@@ -964,6 +1009,29 @@ class ZipController extends AbstractActionController {
     }
     header('Content-Type: application/json');
     echo json_encode(['total_bytes' => $total, 'total_files' => $fileCount]);
+    exit;
+  }
+
+  /**
+   * Cancel a running ZIP generation.
+   *
+   * POST /zip-download/cancel with progress_token=TOKEN.
+   */
+  public function cancelAction() {
+    $token = (string) $this->params()->fromPost('progress_token', $this->params()->fromQuery('progress_token', ''));
+    if ($token === '') {
+      return $this->jsonError(400, 'Missing token');
+    }
+    $meta = $this->readProgress($token);
+    if (!$meta) {
+      return $this->jsonError(404, 'Token not found');
+    }
+    $meta['status'] = 'canceled';
+    $meta['canceled_at'] = time();
+    // Keep bytes_sent/total_bytes/started_at if present.
+    $this->writeProgress($token, $meta);
+    header('Content-Type: application/json');
+    echo json_encode(['status' => 'canceled']);
     exit;
   }
 

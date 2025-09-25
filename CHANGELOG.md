@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 (2025-09-25)
+
+- Fix: Ensure client cancel reliably marks progress token as canceled and prevents accidental fallback to individual downloads.
+- Fix: Preserve canceled state when progress files are written concurrently; use atomic write and locking to avoid races.
+- Fix: Template and client JS updates to avoid stale cached JS causing fallback behavior (cache-busted asset path).
+
 ## 0.2.0 (2025-09-24)
 
 - Rewrote ZipDownload streaming implementation to use ZipStream-PHP and stream archives without building a local temp ZIP.

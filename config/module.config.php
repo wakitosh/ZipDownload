@@ -100,6 +100,63 @@ return [
         ],
         'may_terminate' => TRUE,
       ],
+      'site-zip-download-status' => [
+        'type' => Segment::class,
+        'priority' => 10000,
+        'options' => [
+          'route' => '/s/:site-slug/zip-download/status',
+          'constraints' => [
+            'site-slug' => '[a-zA-Z0-9_-]+',
+          ],
+          'defaults' => [
+            'controller' => ZipController::class,
+            'action' => 'status',
+          ],
+        ],
+        'may_terminate' => TRUE,
+      ],
+      'site-zip-download-estimate' => [
+        'type' => Segment::class,
+        'priority' => 10000,
+        'options' => [
+          'route' => '/s/:site-slug/zip-download/estimate',
+          'constraints' => [
+            'site-slug' => '[a-zA-Z0-9_-]+',
+          ],
+          'defaults' => [
+            'controller' => ZipController::class,
+            'action' => 'estimate',
+          ],
+        ],
+        'may_terminate' => TRUE,
+      ],
+      'zip-download-cancel' => [
+        'type' => Segment::class,
+        'priority' => 10000,
+        'options' => [
+          'route' => '/zip-download/cancel',
+          'defaults' => [
+            'controller' => ZipController::class,
+            'action' => 'cancel',
+          ],
+        ],
+        'may_terminate' => TRUE,
+      ],
+      'site-zip-download-cancel' => [
+        'type' => Segment::class,
+        'priority' => 10000,
+        'options' => [
+          'route' => '/s/:site-slug/zip-download/cancel',
+          'constraints' => [
+            'site-slug' => '[a-zA-Z0-9_-]+',
+          ],
+          'defaults' => [
+            'controller' => ZipController::class,
+            'action' => 'cancel',
+          ],
+        ],
+        'may_terminate' => TRUE,
+      ],
     ],
   ],
 ];
