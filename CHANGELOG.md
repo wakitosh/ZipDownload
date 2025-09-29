@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.1 (2025-09-30)
+
+- Settings (site-level): Moved Download/Export panel texts/links from theme to Site Settings. New keys (underscored) are persisted and grouped under a visible “ZipDownload” heading:
+	- `zipdownload_download_panel_title`
+	- `zipdownload_download_terms_url`
+	- `zipdownload_download_terms_label`
+	- `zipdownload_export_block_title`
+	- `zipdownload_export_icon_iiif_url`
+	- `zipdownload_export_icon_jsonld_url`
+	- `zipdownload_export_manifest_property`
+- Admin: Added input filters so values save correctly across Omeka S v4; prefill existing values in the Site Settings form; added element_groups label “ZipDownload”.
+- Templates: Prefer siteSetting (underscored) with backward-compatible fallback to legacy dotted keys; removed themeSetting fallbacks so configuration is theme-agnostic.
+- Export icons: Provide default IIIF/JSON‑LD icon URLs when site settings are empty and fix icon size to 24×24 for consistent display across themes.
+- Theme cleanup: Removed ZipDownload-related settings from `foundation_tsukuba2025` theme.ini (terms URL/label, panel title, export icons, manifest property, client-side ZIP toggle). Configure via Site Settings instead.
+- Download logs: Added admin logs UI (browse/export/clear) and ensured logs table is auto-created; logs include status, bytes, counts, IP/user, user agent, and more.
+
+日本語サマリ:
+- サイト設定: ダウンロード/エクスポートの文言・リンク設定をテーマ設定から「サイト設定 > ZipDownload」に移動（保存可能、見出し付き）。
+- テンプレート: サイト設定（アンダースコア）を優先し、旧ドット名を後方互換で参照。テーマ設定へのフォールバックは撤廃。
+- アイコン: IIIF/JSON‑LD の既定アイコンURLを用意し、常に 24×24px 表示に統一。
+- テーマ整理: foundation_tsukuba2025 の ZipDownload 関連テーマ設定を削除。以後はサイト設定から変更してください。
+- ログ: 管理 UI を追加（閲覧／CSV エクスポート／全削除）。ログテーブルは自動作成し、ステータス・バイト数・件数・IP/ユーザー・User-Agent 等を記録。
+
 ## 0.3.0 (2025-09-29)
 
 - Concurrency: Introduced OS-level slot locks (flock) to cap global concurrent ZIP builds and auto-release on crash. Avoids stale in-use blocks.
@@ -17,6 +40,12 @@
 - IIIF: 概算加算に上限（テールガード）を設け、初期段階で100%になる現象を回避。
 - キャンセル/完了: キャンセル時/完了時に `bytes_sent` を尊重して最終値を保持。
 - 日本語ローカライズ: サイトのロケールがJAのときはJSONメッセージを日本語に。
+
+### Client JS
+
+- Unified to a single `downloads.js`. Removed deprecated `downloads-lite.js` file and its references.
+	- Prevents double-binding issues and simplifies maintenance.
+	- Fallback partial continues to load only `downloads.js` with cache-busting via `assetUrl`.
 
 ## 0.2.4 (2025-09-26)
 

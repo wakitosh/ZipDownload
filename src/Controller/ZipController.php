@@ -102,10 +102,23 @@ class ZipController extends AbstractActionController {
    */
   private $tempDir;
 
+  /**
+   * Doctrine DBAL connection for logging.
+   *
+   * @var \Doctrine\DBAL\Connection|null
+   */
+  private $conn;
+
   public function __construct($entityManager, $container) {
     $this->em = $entityManager;
     $this->logger = $container->get('Omeka\\Logger');
     $this->tempDir = sys_get_temp_dir();
+    try {
+      $this->conn = $container->get('Omeka\\Connection');
+    }
+    catch (\Throwable $e) {
+      $this->conn = NULL;
+    }
     // Load runtime settings from Omeka settings service when available.
     $defaults = [
       'max_concurrent_downloads_global' => self::MAX_CONCURRENT_DOWNLOADS_GLOBAL,
@@ -181,10 +194,32 @@ class ZipController extends AbstractActionController {
    */
   public function itemAction() {
     $id = (int) $this->params()->fromRoute('id');
+    // Parse basic request context early for logging.
+    $rawMediaIds = $this->params()->fromPost('media_ids', $this->params()->fromQuery('media_ids', []));
+    if (is_string($rawMediaIds)) {
+      $rawMediaIds = array_filter(array_map('intval', explode(',', $rawMediaIds)));
+    }
+    elseif (!is_array($rawMediaIds)) {
+      $rawMediaIds = [];
+    }
+    $progressTokenParam = (string) $this->params()->fromPost('progress_token', $this->params()->fromQuery('progress_token', ''));
+    $estimatedFromClient = (int) $this->params()->fromPost('estimated_total_bytes', $this->params()->fromQuery('estimated_total_bytes', 0));
     // Acquire a global download slot at the very beginning to avoid being
     // blocked by stale progress files. The OS-level lock is released on
     // shutdown, even if the request crashes.
     if (!$this->acquireSlotLock()) {
+      // Log delayed due to no available slot.
+      $this->logInsert([
+        'status' => 'delayed',
+        'item_id' => $id,
+        'media_ids' => $rawMediaIds ? implode(',', $rawMediaIds) : NULL,
+        'media_count' => count($rawMediaIds),
+        'bytes_total' => max(0, $estimatedFromClient),
+        'bytes_sent' => 0,
+        'progress_token' => $progressTokenParam ?: NULL,
+        'slot_index' => NULL,
+        'error_message' => 'No slot available',
+      ]);
       header('Content-Type: application/json', TRUE, 429);
       $msg = $this->currentLocaleIsJa()
         ? 'すべてのダウンロード枠が使用中です。少し待ってからもう一度お試しください。'
@@ -301,6 +336,17 @@ class ZipController extends AbstractActionController {
     // If slot locks limit concurrency to 1, the total active bytes check is
     // largely redundant. Keep it as a soft guard but ignore stale 'running'.
     if (($activeBytes + $requestedEstimate) > $this->maxTotalActiveBytes) {
+      $this->logInsert([
+        'status' => 'delayed',
+        'item_id' => $id,
+        'media_ids' => $rawMediaIds ? implode(',', $rawMediaIds) : NULL,
+        'media_count' => count($rawMediaIds),
+        'bytes_total' => max(0, (int) $requestedEstimate),
+        'bytes_sent' => 0,
+        'progress_token' => $progressTokenParam ?: NULL,
+        'slot_index' => $this->slotLockIndex > 0 ? $this->slotLockIndex : NULL,
+        'error_message' => 'Active bytes limit',
+      ]);
       header('Content-Type: application/json', TRUE, 429);
       $msg = $this->currentLocaleIsJa()
         ? 'サーバーが他の大きなダウンロードを処理中です。少し待ってからもう一度お試しください。'
@@ -312,6 +358,17 @@ class ZipController extends AbstractActionController {
       exit;
     }
     if ($requestedFileCount > $this->maxFilesPerDownload) {
+      $this->logInsert([
+        'status' => 'rejected',
+        'item_id' => $id,
+        'media_ids' => $rawMediaIds ? implode(',', $rawMediaIds) : NULL,
+        'media_count' => count($rawMediaIds),
+        'bytes_total' => max(0, (int) $requestedEstimate),
+        'bytes_sent' => 0,
+        'progress_token' => $progressTokenParam ?: NULL,
+        'slot_index' => $this->slotLockIndex > 0 ? $this->slotLockIndex : NULL,
+        'error_message' => 'Too many files requested',
+      ]);
       header('Content-Type: application/json', TRUE, 413);
       echo json_encode([
         'error' => $this->translateMessage('Too many files requested'),
@@ -329,6 +386,18 @@ class ZipController extends AbstractActionController {
       $mediaIds = [];
     }
     if (!$mediaIds) {
+      // Log and fail.
+      $this->logInsert([
+        'status' => 'failed',
+        'item_id' => $id,
+        'media_ids' => NULL,
+        'media_count' => 0,
+        'bytes_total' => 0,
+        'bytes_sent' => 0,
+        'progress_token' => $progressTokenParam ?: NULL,
+        'slot_index' => $this->slotLockIndex > 0 ? $this->slotLockIndex : NULL,
+        'error_message' => 'No media selected',
+      ]);
       return $this->jsonError(400, 'No media selected');
     }
 
@@ -351,6 +420,17 @@ class ZipController extends AbstractActionController {
       $medias[] = $m;
     }
     if (!$medias) {
+      $this->logInsert([
+        'status' => 'failed',
+        'item_id' => $id,
+        'media_ids' => $mediaIds ? implode(',', $mediaIds) : NULL,
+        'media_count' => is_array($mediaIds) ? count($mediaIds) : 0,
+        'bytes_total' => max(0, (int) $requestedEstimate),
+        'bytes_sent' => 0,
+        'progress_token' => $progressTokenParam ?: NULL,
+        'slot_index' => $this->slotLockIndex > 0 ? $this->slotLockIndex : NULL,
+        'error_message' => 'No accessible media',
+      ]);
       return $this->jsonError(403, 'No accessible media');
     }
 
@@ -358,6 +438,8 @@ class ZipController extends AbstractActionController {
     $addedOrig = 0;
     $addedIiif = 0;
     $addedThumb = 0;
+    // Actual total bytes added to the ZIP, computed from real file sizes.
+    $bytesTotalActual = 0;
 
     // Optional progress token from client to report status.
     $progressToken = (string) $this->params()->fromPost('progress_token', $this->params()->fromQuery('progress_token', ''));
@@ -435,6 +517,19 @@ class ZipController extends AbstractActionController {
     $title = $title !== '' ? $title : ('item-' . $id);
     $safeTitle = $this->sanitizeFilename($title);
     $encoded = rawurlencode($safeTitle . '.zip');
+
+    // Insert running log row.
+    $logId = $this->logInsert([
+      'status' => 'running',
+      'item_id' => $id,
+      'item_title' => $title,
+      'media_ids' => $mediaIds ? implode(',', $mediaIds) : NULL,
+      'media_count' => is_array($mediaIds) ? count($mediaIds) : 0,
+      'bytes_total' => max(0, (int) $requestedEstimate),
+      'bytes_sent' => 0,
+      'progress_token' => $progressTokenParam ?: NULL,
+      'slot_index' => $this->slotLockIndex > 0 ? $this->slotLockIndex : NULL,
+    ]);
 
     while (ob_get_level() > 0) {
       @ob_end_clean();
@@ -522,8 +617,10 @@ class ZipController extends AbstractActionController {
             'source' => (string) $media->getSource(),
           ]
         );
-        $added = $this->addIiifImagesToZipStream($zip, $media, $makeUnique);
+        [$added, $iiifBytes] = $this->addIiifImagesToZipStream($zip, $media, $makeUnique);
         if ($added > 0) {
+          // Count actual bytes from IIIF payloads.
+          $bytesTotalActual += (int) $iiifBytes;
           $addedIiif += $added;
           $addedTotal += $added;
           // Update progress: approximate bytes added from IIIF (bounded).
@@ -610,6 +707,14 @@ class ZipController extends AbstractActionController {
           continue;
         }
 
+        // Add known local file size to actual total bytes.
+        if (is_file($localPath)) {
+          $szLocal = @filesize($localPath);
+          if (is_int($szLocal) || is_float($szLocal)) {
+            $bytesTotalActual += (int) $szLocal;
+          }
+        }
+
         $nameForZip = (string) $makeUnique($zipName ?: basename($localPath));
         $fp = @fopen($localPath, 'rb');
         if ($fp) {
@@ -654,15 +759,19 @@ class ZipController extends AbstractActionController {
 
     $zip->finish();
     if ($progressToken) {
-
       $metaFinal = $this->readProgress($progressToken);
       $finalSent = isset($metaFinal['bytes_sent']) ? (int) $metaFinal['bytes_sent'] : $bytesSent;
+      // Use actual total; ensure sent is not less than total at completion.
+      $finalTotal = (int) $bytesTotalActual;
+      if ($finalSent < $finalTotal) {
+        $finalSent = $finalTotal;
+      }
       $this->writeProgress(
         $progressToken,
         [
           'status' => 'done',
           'bytes_sent' => $finalSent,
-          'total_bytes' => $totalBytesEstimate,
+          'total_bytes' => $finalTotal,
           'started_at' => $startedAt,
         ]
       );
@@ -686,13 +795,28 @@ class ZipController extends AbstractActionController {
       }
     }
 
+    // Update log as done.
+    if (!empty($logId)) {
+      $finishedAt = time();
+      $durationMs = max(0, (int) (($finishedAt - $startedAt) * 1000));
+      $bytesFinal = isset($finalSent) ? (int) $finalSent : (int) $bytesSent;
+      $finalTotal = (int) $bytesTotalActual;
+      $this->logUpdateById((int) $logId, [
+        'status' => 'done',
+        'finished_at' => $finishedAt,
+        'duration_ms' => $durationMs,
+        'bytes_sent' => $bytesFinal,
+        'bytes_total' => $finalTotal,
+      ]);
+    }
+
     exit;
   }
 
   /**
    * Try to fetch IIIF images and add them to the given ZipStream.
    */
-  private function addIiifImagesToZipStream(ZipStream $zip, Media $media, callable $makeUnique): int {
+  private function addIiifImagesToZipStream(ZipStream $zip, Media $media, callable $makeUnique): array {
     $services = $this->getEvent()->getApplication()->getServiceManager();
     $client = NULL;
     try {
@@ -765,7 +889,7 @@ class ZipController extends AbstractActionController {
     }
 
     if (!is_array($iiif) || !$iiif) {
-      return 0;
+      return [0, 0];
     }
 
     // Look for a service id in a few common places (simple heuristic).
@@ -826,10 +950,11 @@ class ZipController extends AbstractActionController {
     );
 
     if (empty($serviceIds)) {
-      return 0;
+      return [0, 0];
     }
 
     $added = 0;
+    $bytesAdded = 0;
     foreach ($serviceIds as $idx => $serviceId) {
       if (!$serviceId || !$client) {
         $this->safeLog(
@@ -960,6 +1085,9 @@ class ZipController extends AbstractActionController {
             'bytes' => is_string($body) ? strlen($body) : 0,
           ]
         );
+        if (is_string($body)) {
+          $bytesAdded += strlen($body);
+        }
         $added++;
       }
       catch (\Throwable $e) {
@@ -975,7 +1103,8 @@ class ZipController extends AbstractActionController {
       }
     }
 
-    return $added;
+    // Return added count and the actual bytes added from IIIF bodies.
+    return [$added, $bytesAdded];
   }
 
   /**
@@ -1293,9 +1422,167 @@ class ZipController extends AbstractActionController {
     $meta['canceled_at'] = time();
     // Keep bytes_sent/total_bytes/started_at if present.
     $this->writeProgress($token, $meta);
+    // Update DB log as canceled.
+    try {
+      $finishedAt = (int) ($meta['canceled_at'] ?? time());
+      $started = (int) ($meta['started_at'] ?? $finishedAt);
+      $durationMs = max(0, (int) (($finishedAt - $started) * 1000));
+      $this->logUpdateByToken($token, [
+        'status' => 'canceled',
+        'finished_at' => $finishedAt,
+        'duration_ms' => $durationMs,
+        'bytes_sent' => (int) ($meta['bytes_sent'] ?? 0),
+        'bytes_total' => (int) ($meta['total_bytes'] ?? 0),
+      ]);
+    }
+    catch (\Throwable $e) {
+    }
     header('Content-Type: application/json');
     echo json_encode(['status' => 'canceled']);
     exit;
+  }
+
+  /**
+   * Insert a log row and return its id.
+   */
+  private function logInsert(array $data): ?int {
+    if (!$this->conn) {
+      return NULL;
+    }
+    try {
+      $now = time();
+      $user = $this->getUserContext();
+      $record = [
+        'started_at' => $now,
+        'finished_at' => NULL,
+        'duration_ms' => NULL,
+        'status' => (string) ($data['status'] ?? 'running'),
+        'item_id' => (int) ($data['item_id'] ?? 0),
+        'item_title' => isset($data['item_title']) ? (string) $data['item_title'] : NULL,
+        'media_ids' => isset($data['media_ids']) ? (string) $data['media_ids'] : NULL,
+        'media_count' => (int) ($data['media_count'] ?? 0),
+        'bytes_total' => (int) ($data['bytes_total'] ?? 0),
+        'bytes_sent' => (int) ($data['bytes_sent'] ?? 0),
+        'client_ip' => $this->getClientIp(),
+        'user_id' => $user['user_id'] ?? NULL,
+        'user_email' => $user['user_email'] ?? NULL,
+        'site_slug' => $user['site_slug'] ?? NULL,
+        'progress_token' => isset($data['progress_token']) ? (string) $data['progress_token'] : NULL,
+        'error_message' => isset($data['error_message']) ? (string) $data['error_message'] : NULL,
+        'slot_index' => isset($data['slot_index']) ? (int) $data['slot_index'] : NULL,
+        'user_agent' => isset($_SERVER['HTTP_USER_AGENT']) ? (string) $_SERVER['HTTP_USER_AGENT'] : NULL,
+      ];
+      $this->conn->insert('zipdownload_log', $record);
+      return (int) $this->conn->lastInsertId();
+    }
+    catch (\Throwable $e) {
+      return NULL;
+    }
+  }
+
+  /**
+   * Update a log row by id.
+   */
+  private function logUpdateById(int $id, array $data): void {
+    if (!$this->conn) {
+      return;
+    }
+    try {
+      $allowed = [
+        'status', 'finished_at', 'duration_ms', 'bytes_total', 'bytes_sent', 'item_title', 'error_message',
+      ];
+      $update = [];
+      foreach ($allowed as $k) {
+        if (array_key_exists($k, $data)) {
+          $update[$k] = $data[$k];
+        }
+      }
+      if ($update) {
+        $this->conn->update('zipdownload_log', $update, ['id' => $id]);
+      }
+    }
+    catch (\Throwable $e) {
+    }
+  }
+
+  /**
+   * Update a log row by progress token.
+   */
+  private function logUpdateByToken(string $token, array $data): void {
+    if (!$this->conn || $token === '') {
+      return;
+    }
+    try {
+      $allowed = [
+        'status', 'finished_at', 'duration_ms', 'bytes_total', 'bytes_sent', 'item_title', 'error_message',
+      ];
+      $update = [];
+      foreach ($allowed as $k) {
+        if (array_key_exists($k, $data)) {
+          $update[$k] = $data[$k];
+        }
+      }
+      if (!$update) {
+        return;
+      }
+      // Find id by token.
+      $id = $this->conn->fetchOne('SELECT id FROM zipdownload_log WHERE progress_token = ? ORDER BY id DESC LIMIT 1', [$token]);
+      if ($id) {
+        $this->conn->update('zipdownload_log', $update, ['id' => (int) $id]);
+      }
+    }
+    catch (\Throwable $e) {
+    }
+  }
+
+  /**
+   * Get client IP address.
+   */
+  private function getClientIp(): ?string {
+    $keys = ['HTTP_X_FORWARDED_FOR', 'HTTP_CLIENT_IP', 'REMOTE_ADDR'];
+    foreach ($keys as $k) {
+      if (!empty($_SERVER[$k])) {
+        $v = (string) $_SERVER[$k];
+        // X-Forwarded-For may contain a list.
+        if ($k === 'HTTP_X_FORWARDED_FOR' && strpos($v, ',') !== FALSE) {
+          $v = trim(explode(',', $v)[0]);
+        }
+        return $v;
+      }
+    }
+    return NULL;
+  }
+
+  /**
+   * Get current user context.
+   */
+  private function getUserContext(): array {
+    $out = [];
+    try {
+      if (method_exists($this, 'identity')) {
+        $user = $this->identity();
+        if ($user && is_object($user)) {
+          if (method_exists($user, 'getId')) {
+            $out['user_id'] = (int) $user->getId();
+          }
+          if (method_exists($user, 'getEmail')) {
+            $out['user_email'] = (string) $user->getEmail();
+          }
+        }
+      }
+    }
+    catch (\Throwable $e) {
+    }
+    // Site slug from route if present.
+    try {
+      $siteSlug = (string) $this->params()->fromRoute('site-slug', '');
+      if ($siteSlug !== '') {
+        $out['site_slug'] = $siteSlug;
+      }
+    }
+    catch (\Throwable $e) {
+    }
+    return $out;
   }
 
 }

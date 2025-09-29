@@ -1,0 +1,291 @@
+<?php
+/** @var array $rows */
+/** @var int $page */
+/** @var int $perPage */
+/** @var int $total */
+/** @var array $filters */
+
+$translate = $this->plugin('translate');
+$pages = (int) max(1, ceil($total / max(1, $perPage)));
+$filters = isset($filters) && is_array($filters) ? $filters : [];
+
+// Preserve current filters on export links (pagination is ignored for exports).
+$exportCsv = $this->url('admin/zip-download-logs-export', [], ['query' => array_merge($filters, ['format' => 'csv'])]);
+$exportTsv = $this->url('admin/zip-download-logs-export', [], ['query' => array_merge($filters, ['format' => 'tsv'])]);
+// Excel-safe CSV (IDなどを文字列として扱わせる)
+$exportCsvExcel = $this->url('admin/zip-download-logs-export', [], ['query' => array_merge($filters, ['format' => 'csv', 'excel' => 1])]);
+?>
+
+<?= $this->pageTitle($translate('ZipDownload logs')) ?>
+
+<style>
+  /* Only unclamp the minimal admin layout to avoid clipping */
+  body.minimal div[role=main] { overflow: visible !important; min-height: auto !important; height: auto !important; }
+  #content { height: auto !important; min-height: auto !important; overflow: visible !important; }
+  /* Ensure logs container is visible even if a global .section rule hides elements */
+  #zipdownload-logs { display: block !important; }
+  /* Visual separation for filter and delete sections */
+  .zipd-sections { display: grid; grid-template-columns: 1fr; gap: 1rem; margin-bottom: 1rem; }
+  @media (min-width: 900px) { .zipd-sections { grid-template-columns: 1fr 1fr; } }
+  .zipd-section { border: 1px solid #ddd; background: #fafafa; padding: 1rem; border-radius: 4px; }
+  .zipd-section h3 { margin: 0 0 .5rem; font-size: 1rem; }
+</style>
+
+<fieldset id="page-actions">
+  <a class="button" href="<?= $this->escapeHtml($exportCsv) ?>"><?= $translate('Export CSV') ?></a>
+  <a class="button" href="<?= $this->escapeHtml($exportCsvExcel) ?>"><?= $translate('Export CSV (Excel-safe)') ?></a>
+  <a class="button" href="<?= $this->escapeHtml($exportTsv) ?>"><?= $translate('Export TSV') ?></a>
+</fieldset>
+
+<div class="zipd-sections">
+  <div class="zipd-section">
+    <h3><?= $translate('Filter') ?></h3>
+<?php
+// Prepare values for filter inputs.
+$tz = (string) ($this->setting('time_zone', 'UTC')); // System timezone
+$fmt = function ($ts) use ($tz) {
+  $ts = (int) $ts;
+  if ($ts <= 0) return '-';
+  try {
+    $dt = new \DateTime('@' . $ts); // UTC base
+    $dt->setTimezone(new \DateTimeZone($tz));
+    return $dt->format('Y-m-d H:i:s');
+  } catch (\Throwable $e) {
+    return date('Y-m-d H:i:s', $ts);
+  }
+};
+$statusVal = isset($filters['status']) ? (string) $filters['status'] : '';
+$itemIdVal = isset($filters['item_id']) ? (int) $filters['item_id'] : 0;
+$userIdVal = isset($filters['user_id']) ? (int) $filters['user_id'] : 0;
+$ipVal = isset($filters['client_ip']) ? (string) $filters['client_ip'] : '';
+$siteVal = isset($filters['site_slug']) ? (string) $filters['site_slug'] : '';
+$titleVal = isset($filters['item_title']) ? (string) $filters['item_title'] : '';
+$tokenVal = isset($filters['progress_token']) ? (string) $filters['progress_token'] : '';
+$fromTs = isset($filters['started_from']) ? (int) $filters['started_from'] : 0;
+$toTs = isset($filters['started_to']) ? (int) $filters['started_to'] : 0;
+$fromVal = $fromTs > 0 ? date('Y-m-d', $fromTs) : '';
+$toVal = $toTs > 0 ? date('Y-m-d', $toTs) : '';
+?>
+
+    <form method="get" class="form" style="margin: 0;">
+      <div class="field">
+        <div class="field-meta">
+          <label for="filter-status"><?= $translate('Status') ?></label>
+        </div>
+        <div class="inputs">
+          <select name="status" id="filter-status">
+            <?php $opts = ['', 'running', 'done', 'canceled', 'failed', 'delayed', 'rejected']; ?>
+            <?php foreach ($opts as $opt): ?>
+              <?php $label = $opt === '' ? $translate('(any)') : $opt; ?>
+              <option value="<?= $this->escapeHtmlAttr($opt) ?>" <?= $statusVal === $opt ? 'selected' : '' ?>><?= $this->escapeHtml($label) ?></option>
+            <?php endforeach; ?>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <div class="field-meta">
+          <label for="filter-started-from"><?= $translate('Date range') ?></label>
+        </div>
+        <div class="inputs">
+          <input type="date" name="started_from" id="filter-started-from" value="<?= $this->escapeHtmlAttr($fromVal) ?>" />
+          &ndash;
+          <input type="date" name="started_to" id="filter-started-to" value="<?= $this->escapeHtmlAttr($toVal) ?>" />
+        </div>
+      </div>
+      <div class="field">
+        <div class="field-meta">
+          <label for="filter-item-id"><?= $translate('Item ID') ?></label>
+        </div>
+        <div class="inputs">
+          <input type="number" name="item_id" id="filter-item-id" value="<?= $itemIdVal ? (int) $itemIdVal : '' ?>" />
+        </div>
+      </div>
+      <div class="field">
+        <div class="field-meta">
+          <label for="filter-user-id"><?= $translate('User ID') ?></label>
+        </div>
+        <div class="inputs">
+          <input type="number" name="user_id" id="filter-user-id" value="<?= $userIdVal ? (int) $userIdVal : '' ?>" />
+        </div>
+      </div>
+      <div class="field">
+        <div class="field-meta">
+          <label for="filter-client-ip"><?= $translate('Client IP') ?></label>
+        </div>
+        <div class="inputs">
+          <input type="text" name="client_ip" id="filter-client-ip" value="<?= $this->escapeHtmlAttr($ipVal) ?>" />
+        </div>
+      </div>
+      <div class="field">
+        <div class="field-meta">
+          <label for="filter-site-slug"><?= $translate('Site slug') ?></label>
+        </div>
+        <div class="inputs">
+          <input type="text" name="site_slug" id="filter-site-slug" value="<?= $this->escapeHtmlAttr($siteVal) ?>" />
+        </div>
+      </div>
+      <div class="field">
+        <div class="field-meta">
+          <label for="filter-item-title"><?= $translate('Item title') ?></label>
+        </div>
+        <div class="inputs">
+          <input type="text" name="item_title" id="filter-item-title" value="<?= $this->escapeHtmlAttr($titleVal) ?>" />
+        </div>
+      </div>
+      <div class="field">
+        <div class="field-meta">
+          <label for="filter-progress-token"><?= $translate('Progress token') ?></label>
+        </div>
+        <div class="inputs">
+          <input type="text" name="progress_token" id="filter-progress-token" value="<?= $this->escapeHtmlAttr($tokenVal) ?>" />
+        </div>
+      </div>
+      <div class="field">
+        <div class="field-meta">
+          <label for="filter-per-page"><?= $translate('Rows per page') ?></label>
+        </div>
+        <div class="inputs">
+          <?php $pp = (int) $perPage; $choices = [25, 50, 100]; if (!in_array($pp, $choices, true)) { $choices[] = $pp; sort($choices); } ?>
+          <select name="per_page" id="filter-per-page">
+            <?php foreach ($choices as $n): ?>
+              <option value="<?= (int) $n ?>" <?= $pp === (int) $n ? 'selected' : '' ?>><?= (int) $n ?></option>
+            <?php endforeach; ?>
+          </select>
+        </div>
+      </div>
+      <input type="hidden" name="page" value="1" />
+      <div class="field" style="margin-top:.5rem;">
+        <div class="field-meta"><label>&nbsp;</label></div>
+        <div class="inputs">
+          <button type="submit" class="button"><?= $translate('Filter') ?></button>
+          <a class="button" href="<?= $this->escapeHtml($this->url('admin/zip-download-logs')) ?>"><?= $translate('Clear') ?></a>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <div class="zipd-section">
+    <h3><?= $translate('Clear logs') ?></h3>
+    <form id="zipdownload-clear-form" method="post" action="<?= $this->escapeHtml($this->url('admin/zip-download-logs-clear')) ?>" class="form" style="margin: 0;">
+      <?php if (isset($confirmForm)) { echo $this->formElement($confirmForm->get($confirmForm->getName() . '_csrf')); } ?>
+      <div class="field">
+        <div class="field-meta"><label><?= $translate('Target date/time') ?></label></div>
+        <div class="inputs">
+          <label style="margin-right: .75rem;"><input type="radio" name="mode" value="now" checked> <?= $translate('Up to now') ?></label>
+          <label><input type="radio" name="mode" value="before"> <?= $translate('Before date/time') ?></label>
+          <input type="datetime-local" name="before_datetime" id="before-datetime" style="margin-left:.5rem;" disabled>
+        </div>
+      </div>
+      <div class="field">
+        <div class="field-meta"><label><?= $translate('Statuses to delete') ?></label></div>
+        <div class="inputs">
+          <?php $statusOptions = ['running','done','canceled','failed','delayed','rejected']; ?>
+          <?php foreach ($statusOptions as $st): ?>
+            <label style="margin-right: .75rem;"><input type="checkbox" name="statuses[]" value="<?= $this->escapeHtmlAttr($st) ?>"> <?= $this->escapeHtml($st) ?></label>
+          <?php endforeach; ?>
+          <div style="margin-top:.25rem;color:#666;">
+            <?= $translate('If none is checked, all statuses are targeted.') ?>
+          </div>
+        </div>
+      </div>
+      <div class="field">
+        <div class="field-meta"><label>&nbsp;</label></div>
+        <div class="inputs">
+          <button type="submit" class="button" onclick="return confirm('<?= $this->escapeJs($translate('Are you sure you want to delete these logs?')) ?>');"><?= $translate('Delete') ?></button>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+  (function(){
+    var radios = document.querySelectorAll('#zipdownload-clear-form input[name="mode"]');
+    var dt = document.getElementById('before-datetime');
+    function toggle(){ dt.disabled = document.querySelector('#zipdownload-clear-form input[name="mode"][value="before"]').checked ? false : true; }
+    radios.forEach(function(r){ r.addEventListener('change', toggle); });
+    toggle();
+  })();
+  </script>
+<div id="zipdownload-logs">
+  <table class="tablesaw tablesaw-stack" data-tablesaw-mode="stack">
+    <thead>
+      <tr>
+        <th><?= $translate('ID') ?></th>
+        <th><?= $translate('Started') ?></th>
+        <th><?= $translate('Finished') ?></th>
+        <th><?= $translate('Status') ?></th>
+        <th><?= $translate('Item') ?></th>
+        <th><?= $translate('Media Count') ?></th>
+        <th><?= $translate('Bytes Sent / Total') ?></th>
+        <th><?= $translate('IP') ?></th>
+        <th><?= $translate('User') ?></th>
+      </tr>
+    </thead>
+    <tbody>
+      <?php if (!empty($rows)): ?>
+        <?php foreach ($rows as $r): ?>
+          <tr>
+            <td><?= (int) $r['id'] ?></td>
+            <td><?= $this->escapeHtml($fmt($r['started_at'] ?? 0)) ?></td>
+            <td><?= !empty($r['finished_at']) ? $this->escapeHtml($fmt($r['finished_at'])) : '-' ?></td>
+            <td><?= $this->escapeHtml($r['status']) ?></td>
+            <td>
+              <?php
+              $itemId = (int) ($r['item_id'] ?? 0);
+              $itemTitle = trim((string) ($r['item_title'] ?? ''));
+              $label = '#' . $itemId . ($itemTitle !== '' ? ' ' . $this->escapeHtml($itemTitle) : '');
+              $siteSlug = isset($r['site_slug']) ? trim((string) $r['site_slug']) : '';
+              $itemUrl = '';
+              if ($itemId > 0) {
+                if ($siteSlug !== '') {
+                  try {
+                    $itemUrl = $this->url('site/resource-id', ['site-slug' => $siteSlug, 'controller' => 'item', 'id' => $itemId]);
+                  }
+                  catch (\Throwable $e) {
+                    $itemUrl = '/s/' . rawurlencode($siteSlug) . '/item/' . $itemId;
+                  }
+                }
+                else {
+                  try {
+                    $itemUrl = $this->url('admin/id', ['controller' => 'item', 'id' => $itemId]);
+                  }
+                  catch (\Throwable $e) {
+                    $itemUrl = '/admin/item/' . $itemId;
+                  }
+                }
+              }
+              ?>
+              <?php if ($itemUrl): ?>
+                <a href="<?= $this->escapeHtml($itemUrl) ?>" target="_blank" rel="noopener"><?= $label ?></a>
+              <?php else: ?>
+                <?= $label ?>
+              <?php endif; ?>
+            </td>
+            <td><?= (int) ($r['media_count'] ?? 0) ?></td>
+            <td><?= number_format((int) ($r['bytes_sent'] ?? 0)) ?> / <?= number_format((int) ($r['bytes_total'] ?? 0)) ?></td>
+            <td><?= $this->escapeHtml($r['client_ip'] ?? '') ?></td>
+            <td><?= $this->escapeHtml($r['user_email'] ?? '') ?> (<?= (int) ($r['user_id'] ?? 0) ?>)</td>
+          </tr>
+        <?php endforeach; ?>
+      <?php else: ?>
+        <tr>
+          <td colspan="9"><?= $translate('No logs yet.') ?></td>
+        </tr>
+      <?php endif; ?>
+    </tbody>
+  </table>
+  <div class="pagination">
+    <?php if ($pages > 1): ?>
+      <ul class="pagination-list">
+        <?php for ($i = 1; $i <= $pages; $i++): ?>
+          <?php $q = array_merge($filters, ['page' => $i, 'per_page' => $perPage]); ?>
+          <?php $url = $this->url('admin/zip-download-logs', [], ['query' => $q]); ?>
+          <li class="<?= $i === $page ? 'active' : '' ?>">
+            <a href="<?= $this->escapeHtml($url) ?>"><?= $i ?></a>
+          </li>
+        <?php endfor; ?>
+      </ul>
+    <?php endif; ?>
+  </div>
+</div>

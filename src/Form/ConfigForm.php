@@ -73,6 +73,7 @@ class ConfigForm extends Form {
       ],
     ]);
 
+    // Removed: Terms of use link settings are now theme-only.
     // CSRF is provided by Omeka core; no need to add here.
   }
 

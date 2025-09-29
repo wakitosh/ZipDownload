@@ -11,10 +11,30 @@ namespace ZipDownload;
 
 use Laminas\Router\Http\Segment;
 use ZipDownload\Controller\ZipController;
+use ZipDownload\Controller\LogsController;
 use Laminas\ServiceManager\Factory\InvokableFactory;
 use ZipDownload\Form\ConfigForm;
+use ZipDownload\Form\SiteSettingsFieldset;
+use ZipDownload\Site\ResourcePageBlockLayout\ExportLinks;
+use ZipDownload\Site\ResourcePageBlockLayout\DownloadPanel;
 
 return [
+  'resource_page_block_layouts' => [
+    'invokables' => [
+      'exportLinks' => ExportLinks::class,
+      'downloadPanel' => DownloadPanel::class,
+    ],
+  ],
+  'navigation' => [
+    'AdminModule' => [
+      [
+        'label' => 'ZipDownload Logs',
+        'route' => 'admin/zip-download-logs',
+        'resource' => LogsController::class,
+        'privilege' => 'index',
+      ],
+    ],
+  ],
   'controllers' => [
     'factories' => [
       ZipController::class => function ($container) {
@@ -23,15 +43,57 @@ return [
                     $container
                 );
       },
+      LogsController::class => function ($container) {
+                return new LogsController($container);
+      },
     ],
   ],
   'form_elements' => [
     'factories' => [
       ConfigForm::class => InvokableFactory::class,
+      SiteSettingsFieldset::class => InvokableFactory::class,
     ],
   ],
   'router' => [
     'routes' => [
+      // Admin routes for logs UI.
+      'admin' => [
+        'child_routes' => [
+          'zip-download-logs' => [
+            'type' => Segment::class,
+            'options' => [
+              'route' => '/zip-download/logs',
+              'defaults' => [
+                '__NAMESPACE__' => 'ZipDownload\\Controller',
+                'controller' => LogsController::class,
+                'action' => 'index',
+              ],
+            ],
+          ],
+          'zip-download-logs-export' => [
+            'type' => Segment::class,
+            'options' => [
+              'route' => '/zip-download/logs/export',
+              'defaults' => [
+                '__NAMESPACE__' => 'ZipDownload\\Controller',
+                'controller' => LogsController::class,
+                'action' => 'export',
+              ],
+            ],
+          ],
+          'zip-download-logs-clear' => [
+            'type' => Segment::class,
+            'options' => [
+              'route' => '/zip-download/logs/clear',
+              'defaults' => [
+                '__NAMESPACE__' => 'ZipDownload\\Controller',
+                'controller' => LogsController::class,
+                'action' => 'clear',
+              ],
+            ],
+          ],
+        ],
+      ],
       // As a child of site route (for site-context routing stacks)
       'site' => [
         'child_routes' => [
@@ -164,6 +226,11 @@ return [
         ],
         'may_terminate' => TRUE,
       ],
+    ],
+  ],
+  'view_manager' => [
+    'template_path_stack' => [
+      __DIR__ . '/../view',
     ],
   ],
 ];

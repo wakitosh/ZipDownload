@@ -1,0 +1,138 @@
+<?php
+$translate = $this->plugin('translate');
+$escape = $this->plugin('escapeHtml');
+$resource = $this->resource ?? null;
+if (!$resource || (method_exists($resource, 'resourceName') && $resource->resourceName() !== 'items')) { return; }
+$item = $resource;
+
+$lang = $this->lang();
+$isJa = (strpos((string) $lang, 'ja') === 0);
+$valueLang = ((bool) $this->siteSetting('filter_locale_values')) ? [$lang, ''] : null;
+
+// Title and terms link come from theme when available; fallback to minimal defaults.
+// Prefer Site Settings, fallback to Theme Settings, then defaults.
+$dlTitle = trim((string) $this->siteSetting('zipdownload_download_panel_title'));
+if ($dlTitle === '') { $dlTitle = trim((string) $this->siteSetting('zipdownload.download_panel_title')); }
+if ($dlTitle === '') {
+  try { $dlTitle = (string) $this->themeSetting('download_panel_title'); } catch (\Throwable $e) { $dlTitle = ''; }
+}
+if ($dlTitle === '') { $dlTitle = $isJa ? 'ダウンロード' : 'Download'; }
+
+$termsUrl = trim((string) $this->siteSetting('zipdownload_download_terms_url'));
+if ($termsUrl === '') { $termsUrl = trim((string) $this->siteSetting('zipdownload.download_terms_url')); }
+if ($termsUrl === '') {
+  try { $termsUrl = trim((string) $this->themeSetting('download_terms_url')); } catch (\Throwable $e) { $termsUrl = ''; }
+}
+$termsLabel = trim((string) $this->siteSetting('zipdownload_download_terms_label'));
+if ($termsLabel === '') { $termsLabel = trim((string) $this->siteSetting('zipdownload.download_terms_label')); }
+if ($termsLabel === '') {
+  try { $termsLabel = (string) $this->themeSetting('download_terms_label'); } catch (\Throwable $e) { $termsLabel = ''; }
+}
+if ($termsLabel === '') { $termsLabel = $isJa ? '利用条件' : 'Terms of use'; }
+
+// Build media list (simple, safe)
+$mediasForDl = method_exists($item, 'media') ? $item->media() : [];
+$mediaRows = [];
+foreach ($mediasForDl as $m) {
+  $original = method_exists($m, 'originalUrl') ? (string) $m->originalUrl() : '';
+  if ($original === '') { $original = (string) $m->thumbnailUrl('large'); }
+  if ($original === '') { continue; }
+  $label = (string) $m->displayTitle();
+  $path = parse_url($original, PHP_URL_PATH) ?: '';
+  $filename = $path ? basename($path) : ($m->id() . '.bin');
+  $mediaRows[] = [
+    'id' => (int) $m->id(),
+    'label' => $label,
+    'url' => $original,
+    'filename' => $filename,
+  ];
+}
+if (!$mediaRows) { return; }
+
+// Robust site slug and endpoints
+$slug = '';
+try { if (isset($this->site) && $this->site) { $slug = (string) $this->site->slug(); } } catch (\Throwable $e) {}
+if ($slug === '') { try { $slug = (string) $this->params()->fromRoute('site-slug'); } catch (\Throwable $e) {} }
+if ($slug === '') { try { $slug = (string) $this->params()->fromRoute('site'); } catch (\Throwable $e) {} }
+$itemId = (int) $item->id();
+$endpoint = '';
+if ($slug !== '') {
+  try { $endpoint = $this->url('site/zip-download', ['site-slug' => $slug, 'id' => $itemId]); } catch (\Throwable $e) {}
+  if (!$endpoint) { try { $endpoint = $this->url('site/zip-download', ['site' => $slug, 'id' => $itemId]); } catch (\Throwable $e) {} }
+  if (!$endpoint) { $endpoint = '/s/' . rawurlencode($slug) . '/zip-download/item/' . $itemId; }
+}
+if (!$endpoint) { try { $endpoint = $this->url('zip-download', ['id' => $itemId]); } catch (\Throwable $e) {} }
+// Keep endpoint as a relative URL to avoid leaking absolute host across environments
+$endpoint = $endpoint ?: '';
+
+$toggleAllText = $isJa ? 'すべて選択/解除' : 'Select / Deselect all';
+$agreeText = $isJa ? '利用条件に同意しました。' : 'I agree to the terms';
+$downloadBtnText = $isJa ? '選択したメディアをダウンロード' : 'Download selected media';
+
+// Optional IIIF manifest URL for label mapping
+$manifestUrl = '';
+try {
+  $ver = (string) $this->setting('iiifserver_manifest_default_version', '3');
+  $ver = in_array($ver, ['2','3'], true) ? $ver : '3';
+  $manifestUrl = rtrim($this->serverUrl('/'), '/') . '/iiif/' . $ver . '/' . (int) $item->id() . '/manifest';
+} catch (\Throwable $e) { $manifestUrl = ''; }
+?>
+<?php
+// Include advanced JS first; if missing, include lite JS. Both with cache-busting.
+try {
+   $relAdv = __DIR__ . '/../../../asset/js/downloads.js';
+   $vAdv = @filemtime($relAdv) ?: time();
+   // Use Omeka's assetUrl with module context for robust path resolution
+   $this->headScript()->appendFile($this->assetUrl('js/downloads.js', 'ZipDownload') . '?v=' . $vAdv);
+} catch (\Throwable $e) {}
+?>
+<?php
+// Include minimal CSS for scrollable list
+try {
+  $relCss = __DIR__ . '/../../../asset/css/downloads.css';
+  $vCss = @filemtime($relCss) ?: time();
+  $this->headLink()->appendStylesheet($this->assetUrl('css/downloads.css', 'ZipDownload') . '?v=' . $vCss);
+} catch (\Throwable $e) {}
+?>
+<div class="panel download-panel" data-terms-url="<?php echo $escape($termsUrl); ?>"
+  data-item-id="<?php echo (int) $itemId; ?>"
+  data-item-title="<?php echo $escape($item->displayTitle(null, $valueLang)); ?>"
+  data-locale="<?php echo $escape($lang); ?>"
+  data-manifest-url="<?php echo $manifestUrl ? $escape($manifestUrl) : ''; ?>"
+  data-zip-endpoint="<?php echo $escape($endpoint); ?>"
+  data-zip-endpoint-site="<?php echo $escape($endpoint); ?>"
+  data-zip-endpoint-global="<?php try { $u = $this->url('zip-download', ['id' => (int) $itemId]); echo $u ?: ''; } catch (\Throwable $e) { echo ''; } ?>">
+  <h3 class="download-panel__title"><?php echo $escape($dlTitle); ?></h3>
+  <div class="download-panel__list-wrap">
+    <ul class="download-panel__list">
+      <?php foreach ($mediaRows as $row): ?>
+        <li class="download-panel__row">
+          <label>
+            <input type="checkbox" class="download-panel__check"
+                   data-media-id="<?php echo (int) $row['id']; ?>"
+                   data-url="<?php echo $escape($row['url']); ?>"
+                   data-filename="<?php echo $escape($row['filename']); ?>">
+            <span class="download-panel__label" title="<?php echo $escape($row['label']); ?>">
+              <?php echo $escape($row['label']); ?>
+            </span>
+          </label>
+        </li>
+      <?php endforeach; ?>
+    </ul>
+  </div>
+  <div class="download-panel__controls">
+    <button type="button" class="button tiny hollow" data-action="toggle-all"><?php echo $escape($toggleAllText); ?></button>
+  </div>
+  <div class="download-panel__terms">
+    <?php if ($termsUrl): ?>
+      <a href="<?php echo $escape($termsUrl); ?>" target="_blank" rel="noopener"><?php echo $escape($termsLabel); ?></a>
+    <?php endif; ?>
+    <label class="download-panel__agree">
+      <input type="checkbox" class="download-panel__agree-check"> <?php echo $escape($agreeText); ?>
+    </label>
+  </div>
+  <div class="download-panel__actions">
+    <button type="button" class="button success" data-action="download" disabled><?php echo $escape($downloadBtnText); ?></button>
+    <div class="download-panel__progress" aria-live="polite"></div>
+  </div>
+</div>
