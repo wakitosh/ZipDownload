@@ -29,6 +29,22 @@ class ZipController extends AbstractActionController {
   private const PROGRESS_TOKEN_TTL = 7200;
 
   /**
+   * Slot lock handle and index for global concurrency control.
+   *
+   * When acquired, an OS-level flock keeps the slot while this request runs
+   * and is automatically released if the PHP process dies unexpectedly.
+   *
+   * @var resource|null
+   */
+  private $slotLockHandle = NULL;
+  /**
+   * Slot lock index (1-based), or -1 when no lock is held.
+   *
+   * @var int
+   */
+  private $slotLockIndex = -1;
+
+  /**
    * Runtime values (can be overridden from module settings).
    */
   /**
@@ -115,10 +131,70 @@ class ZipController extends AbstractActionController {
   }
 
   /**
+   * Try to acquire one of the N global download slots using flock.
+   *
+   * Returns TRUE on success and keeps the lock open until releaseSlotLock().
+   */
+  private function acquireSlotLock(): bool {
+    $slots = max(1, (int) $this->maxConcurrentDownloadsGlobal);
+    $dir = sys_get_temp_dir();
+    for ($i = 1; $i <= $slots; $i++) {
+      $path = $dir . DIRECTORY_SEPARATOR . 'zipdownload_slot_' . $i . '.lock';
+      $fp = @fopen($path, 'c');
+      if (!$fp) {
+        continue;
+      }
+      // Non-blocking exclusive lock.
+      if (@flock($fp, LOCK_EX | LOCK_NB)) {
+        $this->slotLockHandle = $fp;
+        $this->slotLockIndex = $i;
+        // Record holder pid for diagnostics (best-effort).
+        @ftruncate($fp, 0);
+        @fwrite($fp, (string) getmypid());
+        @fflush($fp);
+        return TRUE;
+      }
+      @fclose($fp);
+    }
+    return FALSE;
+  }
+
+  /**
+   * Release previously acquired slot lock.
+   */
+  private function releaseSlotLock(): void {
+    if ($this->slotLockHandle) {
+      try {
+        @flock($this->slotLockHandle, LOCK_UN);
+      }
+      catch (\Throwable $e) {
+        // Ignore.
+      }
+      @fclose($this->slotLockHandle);
+      $this->slotLockHandle = NULL;
+      $this->slotLockIndex = -1;
+    }
+  }
+
+  /**
    * Stream a ZIP for an item with the given media ids (POST media_ids).
    */
   public function itemAction() {
     $id = (int) $this->params()->fromRoute('id');
+    // Acquire a global download slot at the very beginning to avoid being
+    // blocked by stale progress files. The OS-level lock is released on
+    // shutdown, even if the request crashes.
+    if (!$this->acquireSlotLock()) {
+      header('Content-Type: application/json', TRUE, 429);
+      $msg = $this->currentLocaleIsJa()
+        ? 'すべてのダウンロード枠が使用中です。少し待ってからもう一度お試しください。'
+        : 'All download slots are currently in use. Please wait a moment and try again.';
+      echo json_encode([
+        'error' => $msg,
+        'retry_after' => 60,
+      ]);
+      exit;
+    }
     // ---- server-side concurrency/size guard ----
     // Clean old progress files and compute current active totals.
     $tmpdir = sys_get_temp_dir();
@@ -127,6 +203,9 @@ class ZipController extends AbstractActionController {
     $activeCount = 0;
     $activeBytes = 0;
     $now = time();
+    // Only treat a progress file as "active" if it has been updated recently.
+    // This prevents a stale 'running' file from blocking downloads until TTL.
+    $freshWindow = (int) min(120, max(60, floor($this->progressTokenTtl / 6)));
     foreach ($files as $f) {
       $ok = @is_file($f) && @is_readable($f);
       if (!$ok) {
@@ -134,12 +213,13 @@ class ZipController extends AbstractActionController {
       }
       $data = @json_decode(@file_get_contents($f), TRUE) ?: [];
       $ts = @filemtime($f) ?: 0;
-      if ($ts > 0 && ($now - $ts) > $this->progressTokenTtl) {
+      $age = $ts > 0 ? ($now - $ts) : PHP_INT_MAX;
+      if ($ts > 0 && $age > $this->progressTokenTtl) {
         @unlink($f);
         continue;
       }
       $status = $data['status'] ?? '';
-      if ($status === 'running') {
+      if ($status === 'running' && $age <= $freshWindow) {
         $activeCount++;
         $activeBytes += (int) ($data['total_bytes'] ?? 0);
       }
@@ -205,18 +285,11 @@ class ZipController extends AbstractActionController {
       $requestedFileCount = (int) $this->params()->fromPost('estimated_file_count', $this->params()->fromQuery('estimated_file_count', 0));
     }
 
-    // Check limits: concurrent downloads and total bytes.
-    if ($activeCount >= $this->maxConcurrentDownloadsGlobal) {
-      header('Content-Type: application/json', TRUE, 429);
-      $msg = $this->currentLocaleIsJa()
-        ? 'すべてのダウンロード枠が使用中です。少し待ってからもう一度お試しください。'
-        : 'All download slots are currently in use. Please wait a moment and try again.';
-      echo json_encode([
-        'error' => $msg,
-        'retry_after' => 60,
-      ]);
-      exit;
-    }
+    // Keep initial estimates to seed the progress meta for earlier ETA.
+    $initialTotalBytesEstimate = max(0, (int) $requestedEstimate);
+    $initialFileCount = max(0, (int) $requestedFileCount);
+
+    // Check limits: total bytes (concurrency is enforced by slot locks).
     if ($requestedEstimate > $this->maxBytesPerDownload) {
       header('Content-Type: application/json', TRUE, 413);
       echo json_encode([
@@ -225,6 +298,8 @@ class ZipController extends AbstractActionController {
       ]);
       exit;
     }
+    // If slot locks limit concurrency to 1, the total active bytes check is
+    // largely redundant. Keep it as a soft guard but ignore stale 'running'.
     if (($activeBytes + $requestedEstimate) > $this->maxTotalActiveBytes) {
       header('Content-Type: application/json', TRUE, 429);
       $msg = $this->currentLocaleIsJa()
@@ -290,11 +365,44 @@ class ZipController extends AbstractActionController {
     $bytesSent = 0;
     // Ensure startedAt is always defined for progress records.
     $startedAt = time();
+    // Ensure lock release and emergency progress cleanup on shutdown.
+    register_shutdown_function(function () use ($progressToken, $startedAt) {
+      try {
+        if ($progressToken !== '') {
+          $file = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'zipdownload_progress_' . preg_replace('/[^a-zA-Z0-9_-]/', '_', $progressToken) . '.json';
+          if (@is_file($file) && @is_readable($file)) {
+            $json = @file_get_contents($file);
+            $meta = @json_decode($json, TRUE) ?: [];
+            if (($meta['status'] ?? '') === 'running') {
+              $meta['status'] = 'canceled';
+              $meta['canceled_at'] = time();
+              if (!isset($meta['started_at'])) {
+                $meta['started_at'] = $startedAt;
+              }
+              @file_put_contents($file, json_encode($meta));
+            }
+          }
+        }
+      }
+      catch (\Throwable $e) {
+        // Ignore.
+      }
+      // Always release the slot lock.
+      $this->releaseSlotLock();
+    });
     if ($progressToken) {
       // Try to read total estimate from meta file if present.
       $meta = $this->readProgress($progressToken);
       if (isset($meta['total_bytes'])) {
         $totalBytesEstimate = (int) $meta['total_bytes'];
+      }
+      // Seed total bytes/files from initial quick estimate if meta has none.
+      if ($totalBytesEstimate <= 0 && $initialTotalBytesEstimate > 0) {
+        $totalBytesEstimate = $initialTotalBytesEstimate;
+      }
+      $totalFilesEstimate = isset($meta['total_files']) ? (int) $meta['total_files'] : 0;
+      if ($totalFilesEstimate <= 0 && $initialFileCount > 0) {
+        $totalFilesEstimate = $initialFileCount;
       }
       // Preserve an existing started_at if present.
       if (isset($meta['started_at'])) {
@@ -306,6 +414,7 @@ class ZipController extends AbstractActionController {
           'status' => 'running',
           'bytes_sent' => 0,
           'total_bytes' => $totalBytesEstimate,
+          'total_files' => $totalFilesEstimate,
           'started_at' => $startedAt,
         ]
       );
@@ -384,12 +493,14 @@ class ZipController extends AbstractActionController {
         if ($progressToken) {
           $metaCheck = $this->readProgress($progressToken);
           if (isset($metaCheck['status']) && $metaCheck['status'] === 'canceled') {
-            // Preserve bytes_sent and mark canceled_at.
+            // Preserve bytes_sent from current meta and mark canceled_at.
+            $currentMeta = $this->readProgress($progressToken);
+            $currentSent = isset($currentMeta['bytes_sent']) ? (int) $currentMeta['bytes_sent'] : $bytesSent;
             $this->writeProgress(
               $progressToken,
               [
                 'status' => 'canceled',
-                'bytes_sent' => $bytesSent,
+                'bytes_sent' => $currentSent,
                 'total_bytes' => $totalBytesEstimate,
                 'started_at' => $startedAt,
                 'canceled_at' => time(),
@@ -415,25 +526,40 @@ class ZipController extends AbstractActionController {
         if ($added > 0) {
           $addedIiif += $added;
           $addedTotal += $added;
-          // Update progress: approximate bytes added from IIIF.
+          // Update progress: approximate bytes added from IIIF (bounded).
           if ($progressToken) {
-            // If we have no precise size, add a rough default per file.
-            $approx = (int) max(
-              0,
-              floor(
-                ($totalBytesEstimate > 0 ? $totalBytesEstimate / max(1, $addedTotal) : 2000000)
-              )
-            );
-            $bytesSent += $approx * $added;
-            $this->writeProgress(
-              $progressToken,
-              [
-                'status' => 'running',
-                'bytes_sent' => $bytesSent,
-                'total_bytes' => $totalBytesEstimate,
-                'started_at' => $startedAt,
-              ]
-            );
+            try {
+              $metaNow = $this->readProgress($progressToken);
+              $current = isset($metaNow['bytes_sent']) ? (int) $metaNow['bytes_sent'] : 0;
+              $total = $totalBytesEstimate > 0 ? $totalBytesEstimate : (int) ($metaNow['total_bytes'] ?? 0);
+              $filesTotal = isset($metaNow['total_files']) ? (int) $metaNow['total_files'] : 0;
+              // Fallback to 2MB per file when totals are unknown.
+              $perFile = ($total > 0 && $filesTotal > 0)
+                ? (int) max(1, floor($total / max(1, $filesTotal)))
+                : 2000000;
+              $delta = $perFile * $added;
+              if ($total > 0) {
+                // Keep a small tail guard (>=1MB or 2%) to avoid early 100%.
+                $tailGuard = (int) max(1048576, floor($total * 0.02));
+                $maxBeforeDone = max(0, $total - $tailGuard);
+                $next = min($current + $delta, $maxBeforeDone);
+              }
+              else {
+                $next = $current + $delta;
+              }
+              if ($next > $current) {
+                $metaNow['status'] = 'running';
+                $metaNow['bytes_sent'] = $next;
+                if (!isset($metaNow['total_bytes']) || (int) $metaNow['total_bytes'] <= 0) {
+                  $metaNow['total_bytes'] = $totalBytesEstimate;
+                }
+                $metaNow['started_at'] = $metaNow['started_at'] ?? $startedAt;
+                $this->writeProgress($progressToken, $metaNow);
+                $bytesSent = $next;
+              }
+            }
+            catch (\Throwable $e) {
+            }
           }
           continue;
         }
@@ -484,23 +610,31 @@ class ZipController extends AbstractActionController {
           continue;
         }
 
-        $zip->addFileFromPath((string) $makeUnique($zipName ?: basename($localPath)), (string) $localPath);
-        // Update progress with actual filesize when possible.
-        if ($progressToken) {
-          try {
-            $sz = is_file($localPath) ? filesize($localPath) : 0;
-            $bytesSent += $sz;
-            $this->writeProgress(
-              $progressToken,
+        $nameForZip = (string) $makeUnique($zipName ?: basename($localPath));
+        $fp = @fopen($localPath, 'rb');
+        if ($fp) {
+          $this->ensureProgressFilterRegistered();
+          if ($progressToken) {
+            @stream_filter_append(
+              $fp,
+              'zipdownload.progress',
+              STREAM_FILTER_READ,
               [
-                'status' => 'running',
-                'bytes_sent' => $bytesSent,
-                'total_bytes' => $totalBytesEstimate,
+                'controller' => $this,
+                'token' => $progressToken,
+                'total' => $totalBytesEstimate,
                 'started_at' => $startedAt,
               ]
             );
           }
-          catch (\Throwable $e) {
+          $zip->addFileFromStream($nameForZip, $fp);
+          @fclose($fp);
+          // Refresh local cache from meta to keep rough alignment for logs.
+          if ($progressToken) {
+            $metaNow = $this->readProgress($progressToken);
+            if (isset($metaNow['bytes_sent'])) {
+              $bytesSent = (int) $metaNow['bytes_sent'];
+            }
           }
         }
         if ($media->hasOriginal()) {
@@ -520,11 +654,14 @@ class ZipController extends AbstractActionController {
 
     $zip->finish();
     if ($progressToken) {
+
+      $metaFinal = $this->readProgress($progressToken);
+      $finalSent = isset($metaFinal['bytes_sent']) ? (int) $metaFinal['bytes_sent'] : $bytesSent;
       $this->writeProgress(
         $progressToken,
         [
           'status' => 'done',
-          'bytes_sent' => $bytesSent,
+          'bytes_sent' => $finalSent,
           'total_bytes' => $totalBytesEstimate,
           'started_at' => $startedAt,
         ]

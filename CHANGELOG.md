@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.0 (2025-09-29)
+
+- Concurrency: Introduced OS-level slot locks (flock) to cap global concurrent ZIP builds and auto-release on crash. Avoids stale in-use blocks.
+- Stale-state hygiene: Treat progress files as active only when recently updated; purge beyond TTL to prevent deadlocks.
+- Progress/ETA UX: Seed `total_bytes`/`total_files` at start (from client estimate or quick local estimate) so ETA becomes meaningful early.
+- Streaming: Switched local file addition to ZipStream's `addFileFromStream` in preparation for chunk-based progress updates.
+- IIIF progress guard: Bounded approximate progress for IIIF-added entries with a small tail guard to avoid early 100% display.
+- Cancel/finalize: Cancellation preserves the latest `bytes_sent`; final write respects meta's `bytes_sent` rather than resetting.
+- i18n: Keep server JSON messages localized to JA when site locale is JA.
+
+日本語サマリ:
+- 同時実行: OSロックでダウンロード枠を管理し、異常終了でも自動解放。進行中扱いの古いファイルが枠を塞ぐ問題を抑制。
+- 進捗/ETA: 開始時に合計バイト数/件数をシードし、早い段階からETAを安定表示。
+- ストリーミング: ローカルファイルはストリーム追加に移行（今後のチャンク進捗に備え）。
+- IIIF: 概算加算に上限（テールガード）を設け、初期段階で100%になる現象を回避。
+- キャンセル/完了: キャンセル時/完了時に `bytes_sent` を尊重して最終値を保持。
+- 日本語ローカライズ: サイトのロケールがJAのときはJSONメッセージを日本語に。
+
 ## 0.2.4 (2025-09-26)
 
 - i18n: Localize server messages to Japanese when the site locale is set to JA, without relying on ext/intl.
