@@ -289,8 +289,6 @@
     function init(panel) {
         const manifestUrl = panel.getAttribute('data-manifest-url');
         if (manifestUrl) { fetchManifest(manifestUrl).then(man => extractLabelsFromManifest(man)).then(maps => { applyLabelsFromManifest(panel, maps); }).catch(() => { }); }
-        // Inject media id next to checkbox for horizontal layout
-        try { qsa(panel, '.download-panel__check').forEach(cb => { const id = cb.getAttribute('data-media-id'); if (!id) return; const labelEl = cb.closest('label') || cb.parentElement; if (!labelEl) return; if (labelEl.querySelector('.download-panel__media-id')) return; const idSpan = document.createElement('span'); idSpan.className = 'download-panel__media-id'; idSpan.textContent = '#' + String(id); cb.insertAdjacentElement('afterend', idSpan); }); } catch (e) { }
         panel.addEventListener('change', (e) => { if (e.target.matches('.download-panel__check') || e.target.matches('.download-panel__agree-check')) { updateState(panel); } });
         panel.addEventListener('click', (e) => { const act = e.target.closest('[data-action]'); if (!act) return; const a = act.getAttribute('data-action'); if (a === 'toggle-all') toggleAll(panel); else if (a === 'download') downloadSelected(panel); });
         updateState(panel);

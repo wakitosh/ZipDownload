@@ -143,9 +143,13 @@ class Module extends AbstractModule {
           $siteSettings = $services->get('Omeka\Settings\Site');
           $form->populateValues([
             'zipdownload_download_panel_title' => (string) ($siteSettings->get('zipdownload_download_panel_title') ?? ''),
+            'zipdownload_download_panel_title_ja' => (string) ($siteSettings->get('zipdownload_download_panel_title_ja') ?? ''),
+            'zipdownload_download_panel_title_en' => (string) ($siteSettings->get('zipdownload_download_panel_title_en') ?? ''),
             'zipdownload_download_terms_url' => (string) ($siteSettings->get('zipdownload_download_terms_url') ?? ''),
             'zipdownload_download_terms_label' => (string) ($siteSettings->get('zipdownload_download_terms_label') ?? ''),
             'zipdownload_export_block_title' => (string) ($siteSettings->get('zipdownload_export_block_title') ?? ''),
+            'zipdownload_export_block_title_ja' => (string) ($siteSettings->get('zipdownload_export_block_title_ja') ?? ''),
+            'zipdownload_export_block_title_en' => (string) ($siteSettings->get('zipdownload_export_block_title_en') ?? ''),
             'zipdownload_export_icon_iiif_url' => (string) ($siteSettings->get('zipdownload_export_icon_iiif_url') ?? ''),
             'zipdownload_export_icon_jsonld_url' => (string) ($siteSettings->get('zipdownload_export_icon_jsonld_url') ?? ''),
             'zipdownload_export_manifest_property' => (string) ($siteSettings->get('zipdownload_export_manifest_property') ?? ''),
@@ -165,9 +169,13 @@ class Module extends AbstractModule {
         $inputFilter = $event->getParam('inputFilter');
         foreach ([
           'zipdownload_download_panel_title',
+          'zipdownload_download_panel_title_ja',
+          'zipdownload_download_panel_title_en',
           'zipdownload_download_terms_url',
           'zipdownload_download_terms_label',
           'zipdownload_export_block_title',
+          'zipdownload_export_block_title_ja',
+          'zipdownload_export_block_title_en',
           'zipdownload_export_icon_iiif_url',
           'zipdownload_export_icon_jsonld_url',
           'zipdownload_export_manifest_property',

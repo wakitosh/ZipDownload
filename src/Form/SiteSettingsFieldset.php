@@ -22,10 +22,32 @@ class SiteSettingsFieldset extends Fieldset {
       'name' => 'zipdownload_download_panel_title',
       'type' => Text::class,
       'options' => [
-        'label' => 'Download panel title',
+        'label' => 'Download panel title (fallback)',
       ],
       'attributes' => [
         'id' => 'zipdownload_download_panel_title',
+        'placeholder' => 'Download / ダウンロード',
+      ],
+    ]);
+    $this->add([
+      'name' => 'zipdownload_download_panel_title_ja',
+      'type' => Text::class,
+      'options' => [
+        'label' => 'Download panel title (JA)',
+      ],
+      'attributes' => [
+        'id' => 'zipdownload_download_panel_title_ja',
+        'placeholder' => 'ダウンロード',
+      ],
+    ]);
+    $this->add([
+      'name' => 'zipdownload_download_panel_title_en',
+      'type' => Text::class,
+      'options' => [
+        'label' => 'Download panel title (EN)',
+      ],
+      'attributes' => [
+        'id' => 'zipdownload_download_panel_title_en',
         'placeholder' => 'Download',
       ],
     ]);
@@ -58,10 +80,32 @@ class SiteSettingsFieldset extends Fieldset {
       'name' => 'zipdownload_export_block_title',
       'type' => Text::class,
       'options' => [
-        'label' => 'Export block title',
+        'label' => 'Export block title (fallback)',
       ],
       'attributes' => [
         'id' => 'zipdownload_export_block_title',
+        'placeholder' => 'Export / エクスポート',
+      ],
+    ]);
+    $this->add([
+      'name' => 'zipdownload_export_block_title_ja',
+      'type' => Text::class,
+      'options' => [
+        'label' => 'Export block title (JA)',
+      ],
+      'attributes' => [
+        'id' => 'zipdownload_export_block_title_ja',
+        'placeholder' => 'エクスポート',
+      ],
+    ]);
+    $this->add([
+      'name' => 'zipdownload_export_block_title_en',
+      'type' => Text::class,
+      'options' => [
+        'label' => 'Export block title (EN)',
+      ],
+      'attributes' => [
+        'id' => 'zipdownload_export_block_title_en',
         'placeholder' => 'Export',
       ],
     ]);

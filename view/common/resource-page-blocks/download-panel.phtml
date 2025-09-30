@@ -9,9 +9,11 @@ $lang = $this->lang();
 $isJa = (strpos((string) $lang, 'ja') === 0);
 $valueLang = ((bool) $this->siteSetting('filter_locale_values')) ? [$lang, ''] : null;
 
-// Title and terms link come from theme when available; fallback to minimal defaults.
-// Prefer Site Settings, fallback to Theme Settings, then defaults.
-$dlTitle = trim((string) $this->siteSetting('zipdownload_download_panel_title'));
+// Title resolution: prefer localized Site Settings (JA/EN), then fallback keys, then defaults.
+$dlTitle = trim((string) ($isJa
+  ? $this->siteSetting('zipdownload_download_panel_title_ja')
+  : $this->siteSetting('zipdownload_download_panel_title_en')));
+if ($dlTitle === '') { $dlTitle = trim((string) $this->siteSetting('zipdownload_download_panel_title')); }
 if ($dlTitle === '') { $dlTitle = trim((string) $this->siteSetting('zipdownload.download_panel_title')); }
 if ($dlTitle === '') {
   try { $dlTitle = (string) $this->themeSetting('download_panel_title'); } catch (\Throwable $e) { $dlTitle = ''; }

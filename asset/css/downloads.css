@@ -22,14 +22,29 @@
     margin: 0;
     padding: 0.25rem 0;
     border-bottom: 1px dotted #eee;
+    display: flex;
+    align-items: center;
 }
 
 .download-panel__row:last-child {
     border-bottom: 0;
 }
 
+.download-panel__row>label {
+    /* Keep checkbox and its text on the same line */
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
 .download-panel__label {
     margin-left: 0.5rem;
+    white-space: nowrap;
+}
+
+.download-panel__check {
+    display: inline-block;
+    margin: auto 0;
 }
 
 .download-panel__controls {
@@ -54,10 +69,9 @@
 }
 
 /* Extra polish added from theme, kept optional and non-breaking */
+/* Hide media ID display (IDs must not be shown visibly) */
 .download-panel__media-id {
-    margin-left: 0.4rem;
-    color: #999;
-    font-size: 0.85em;
+    display: none !important;
 }
 
 /* Subtle scroll fade at top/bottom of list */

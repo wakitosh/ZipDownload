@@ -52,7 +52,10 @@ if (!$jsonLdUrl && !$manifestUrl) {
 // Title from Site Settings, fallback to translated default.
 $lang = $this->lang();
 $isJa = (strpos((string) $lang, 'ja') === 0);
-$exportTitle = trim((string) $this->siteSetting('zipdownload_export_block_title'));
+$exportTitle = trim((string) ($isJa
+  ? $this->siteSetting('zipdownload_export_block_title_ja')
+  : $this->siteSetting('zipdownload_export_block_title_en')));
+if ($exportTitle === '') { $exportTitle = trim((string) $this->siteSetting('zipdownload_export_block_title')); }
 if ($exportTitle === '') { $exportTitle = trim((string) $this->siteSetting('zipdownload.export_block_title')); }
 if ($exportTitle === '') { $exportTitle = $isJa ? 'エクスポート' : (string) $translate('Export'); }
 
