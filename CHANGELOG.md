@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.3 (2025-09-30)
+
+- Admin Logs: Added option to clear logs between two date/times (After ~ Before) in addition to existing "Up to now" and "Before date/time".
+	- UI: New "Between date/times" mode with `after_datetime` and `before_datetime_range` inputs. Inputs are enabled/disabled based on selected mode.
+	- Server: `clearAction` now accepts a date range and deletes records where `started_at` falls within the range. Existing status narrowing still applies.
+
+日本語サマリ:
+- 管理ログ: 既存の「今まで」「指定日時まで」に加えて、「開始～終了の範囲（After～Before）」での削除に対応。
+	- 画面: 「Between date/times」モードを追加し、`after_datetime` と `before_datetime_range` を入力可能に（選択モードに応じて有効/無効を切替）。
+	- サーバー: `clearAction` で開始時刻が範囲内のレコードを削除可能に。従来のステータス絞り込みも併用可。
+
 ## 0.3.2 (2025-09-30)
 
 - Site Settings: Added bilingual titles for Download panel and Export block.

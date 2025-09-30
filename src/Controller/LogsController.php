@@ -206,45 +206,71 @@ class LogsController extends AbstractActionController {
       return $this->redirect()->toRoute('admin/zip-download-logs');
     }
 
-    // Mode can be 'now' or 'before'.
+    // Mode can be 'now', 'before', or 'range'.
     $mode = trim((string) ($post['mode'] ?? 'now'));
-    $before = trim((string) ($post['before_datetime'] ?? ''));
     $cutTs = NULL;
+    $startTs = NULL;
+    $endTs = NULL;
+
+    // Helper to parse HTML5 datetime-local in system TZ to UTC epoch.
+    $parseDt = function (string $s) {
+      if ($s === '') {
+        return NULL;
+      }
+      try {
+        $services = $this->getEvent()->getApplication()->getServiceManager();
+        $tz = 'UTC';
+        if ($services->has('Omeka\\Settings')) {
+          $tz = (string) $services->get('Omeka\\Settings')->get('time_zone', 'UTC');
+        }
+        $normalized = str_replace('T', ' ', $s);
+        $dt = new \DateTime($normalized, new \DateTimeZone($tz));
+        $dt->setTimezone(new \DateTimeZone('UTC'));
+        $t = $dt->getTimestamp();
+        return ($t && $t > 0) ? $t : NULL;
+      }
+      catch (\Throwable $e) {
+        return NULL;
+      }
+    };
+
     if ($mode === 'now') {
       $cutTs = time();
     }
-    else {
-      // Accept HTML5 datetime-local: yyyy-mm-ddThh:mm (system timezone).
-      if ($before !== '') {
-        try {
-          $services = $this->getEvent()->getApplication()->getServiceManager();
-          $tz = 'UTC';
-          if ($services->has('Omeka\\Settings')) {
-            $tz = (string) $services->get('Omeka\\Settings')->get('time_zone', 'UTC');
-          }
-          $normalized = str_replace('T', ' ', $before);
-          $dt = new \DateTime($normalized, new \DateTimeZone($tz));
-          // Convert to UTC then get epoch seconds.
-          $dt->setTimezone(new \DateTimeZone('UTC'));
-          $t = $dt->getTimestamp();
-          if ($t && $t > 0) {
-            $cutTs = $t;
-          }
-        }
-        catch (\Throwable $e) {
-          // Fall through.
-        }
-      }
+    elseif ($mode === 'before') {
+      $before = trim((string) ($post['before_datetime'] ?? ''));
+      $cutTs = $parseDt($before);
       if ($cutTs === NULL) {
         $this->messenger()->addError($this->translate('Please specify a valid date and time.'));
         return $this->redirect()->toRoute('admin/zip-download-logs');
       }
     }
+    elseif ($mode === 'range') {
+      $after = trim((string) ($post['after_datetime'] ?? ''));
+      $beforeRange = trim((string) ($post['before_datetime_range'] ?? ''));
+      $startTs = $parseDt($after);
+      $endTs = $parseDt($beforeRange);
+      if ($startTs === NULL || $endTs === NULL || $startTs > $endTs) {
+        $this->messenger()->addError($this->translate('Please specify a valid date/time range.'));
+        return $this->redirect()->toRoute('admin/zip-download-logs');
+      }
+    }
+    else {
+      $cutTs = time();
+    }
 
     try {
       $qb = $this->conn->createQueryBuilder();
-      $qb->delete('zipdownload_log')->where('started_at <= :cut');
-      $qb->setParameter('cut', (int) $cutTs);
+      $qb->delete('zipdownload_log');
+      if ($mode === 'range' && $startTs !== NULL && $endTs !== NULL) {
+        $qb->where('started_at >= :start AND started_at <= :end');
+        $qb->setParameter('start', (int) $startTs);
+        $qb->setParameter('end', (int) $endTs);
+      }
+      else {
+        $qb->where('started_at <= :cut');
+        $qb->setParameter('cut', (int) $cutTs);
+      }
       // Optional status narrowing.
       $statuses = $this->params()->fromPost('statuses', []);
       if (is_string($statuses)) {
