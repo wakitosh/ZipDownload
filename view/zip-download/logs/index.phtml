@@ -234,7 +234,15 @@ $toVal = $toTs > 0 ? date('Y-m-d', $toTs) : '';
               <?php
               $itemId = (int) ($r['item_id'] ?? 0);
               $itemTitle = trim((string) ($r['item_title'] ?? ''));
-              $label = '#' . $itemId . ($itemTitle !== '' ? ' ' . $this->escapeHtml($itemTitle) : '');
+              // Truncate overly long item titles for display, keep full text in title attribute.
+              $maxLen = 60;
+              if (function_exists('mb_strimwidth')) {
+                $shortTitle = mb_strimwidth($itemTitle, 0, $maxLen, '...', 'UTF-8');
+              } else {
+                $shortTitle = (strlen($itemTitle) > $maxLen) ? (substr($itemTitle, 0, $maxLen - 3) . '...') : $itemTitle;
+              }
+              $labelShort = '#' . $itemId . ($itemTitle !== '' ? ' ' . $this->escapeHtml($shortTitle) : '');
+              $labelFull = '#' . $itemId . ($itemTitle !== '' ? ' ' . $itemTitle : '');
               $siteSlug = isset($r['site_slug']) ? trim((string) $r['site_slug']) : '';
               $itemUrl = '';
               if ($itemId > 0) {
@@ -257,9 +265,9 @@ $toVal = $toTs > 0 ? date('Y-m-d', $toTs) : '';
               }
               ?>
               <?php if ($itemUrl): ?>
-                <a href="<?= $this->escapeHtml($itemUrl) ?>" target="_blank" rel="noopener"><?= $label ?></a>
+                <a href="<?= $this->escapeHtml($itemUrl) ?>" target="_blank" rel="noopener" title="<?= $this->escapeHtmlAttr($labelFull) ?>"><?= $labelShort ?></a>
               <?php else: ?>
-                <?= $label ?>
+                <span title="<?= $this->escapeHtmlAttr($labelFull) ?>"><?= $labelShort ?></span>
               <?php endif; ?>
             </td>
             <td><?= (int) ($r['media_count'] ?? 0) ?></td>
