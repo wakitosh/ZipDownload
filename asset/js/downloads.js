@@ -61,7 +61,8 @@
         setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 0);
     }
     async function fetchAsBlob(url) {
-        const res = await fetch(url, { credentials: 'include' });
+        // Use no credentials for cross-origin image fetches to satisfy CORS when ACAO is '*'.
+        const res = await fetch(url, { credentials: 'omit' });
         if (!res.ok) throw new Error('HTTP ' + res.status);
         return await res.blob();
     }
@@ -227,7 +228,7 @@
     }
     function sanitizeName(s, max = 120) { return (String(s || 'file').trim().replace(/\s+/g, ' ').replace(/[\\/:*?"<>|]/g, '_').slice(0, max)) || 'file'; }
     function getRowFullLabel(row) { const span = row.closest('label').querySelector('.download-panel__label'); return (span && span.getAttribute('title')) ? span.getAttribute('title') : (span ? span.textContent.trim() : ''); }
-    async function fetchManifest(url) { const res = await fetch(url, { credentials: 'include', headers: { 'Accept': 'application/json' } }); if (!res.ok) throw new Error('Manifest HTTP ' + res.status); return await res.json(); }
+    async function fetchManifest(url) { const res = await fetch(url, { credentials: 'omit', headers: { 'Accept': 'application/json' } }); if (!res.ok) throw new Error('Manifest HTTP ' + res.status); return await res.json(); }
     function pickIiifFromV3(man) { const out = []; const items = Array.isArray(man.items) ? man.items : []; items.forEach(cv => { const label = (cv && cv.label && cv.label.none && Array.isArray(cv.label.none) && cv.label.none.length) ? String(cv.label.none[0]) : ''; const anno = cv && cv.items && cv.items[0] && cv.items[0].items && cv.items[0].items[0]; const body = anno ? (anno.body || {}) : {}; let serviceId = ''; if (body.service) { if (Array.isArray(body.service) && body.service[0]) serviceId = String(body.service[0].id || body.service[0]['@id'] || ''); else if (body.service.id || body.service['@id']) serviceId = String(body.service.id || body.service['@id'] || ''); } const directId = String(body.id || body['@id'] || ''); out.push({ label, serviceId, directId }); }); return out; }
     function pickIiifFromV2(man) { const out = []; const canvases = (man.sequences && man.sequences[0] && Array.isArray(man.sequences[0].canvases)) ? man.sequences[0].canvases : []; canvases.forEach(cv => { let label = ''; if (typeof cv.label === 'string') label = cv.label; else if (cv.label && typeof cv.label === 'object') { const k = Object.keys(cv.label)[0]; if (k && Array.isArray(cv.label[k]) && cv.label[k].length) label = String(cv.label[k][0]); } const img = cv.images && cv.images[0]; const res = img && img.resource ? img.resource : {}; let serviceId = ''; if (res.service) serviceId = String(res.service['@id'] || res.service.id || ''); const directId = String(res['@id'] || res.id || ''); out.push({ label, serviceId, directId }); }); return out; }
     function buildIiifFullUrl(serviceOrDirect) { const base = String(serviceOrDirect || '').replace(/\/$/, ''); if (!base) return ''; return `${base}/full/max/0/default.jpg`; }

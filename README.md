@@ -76,7 +76,7 @@ Notes:
  - `zipdownload_export_block_title`
  - `zipdownload_export_icon_iiif_url`
  - `zipdownload_export_icon_jsonld_url`
- - `zipdownload_export_manifest_property`
+
 
  If icon URLs are left blank, the module falls back to default icons and displays them at 24×24px.
 
@@ -152,7 +152,7 @@ ZipDownload は、ZipStream-PHP を用いてアイテムに紐づくメディア
 - `zipdownload_export_block_title`
 - `zipdownload_export_icon_iiif_url`
 - `zipdownload_export_icon_jsonld_url`
-- `zipdownload_export_manifest_property`
+
 
 アイコン URL を未設定の場合は既定のアイコンを使用し、常に 24×24px で表示します。
 

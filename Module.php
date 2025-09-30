@@ -152,7 +152,7 @@ class Module extends AbstractModule {
             'zipdownload_export_block_title_en' => (string) ($siteSettings->get('zipdownload_export_block_title_en') ?? ''),
             'zipdownload_export_icon_iiif_url' => (string) ($siteSettings->get('zipdownload_export_icon_iiif_url') ?? ''),
             'zipdownload_export_icon_jsonld_url' => (string) ($siteSettings->get('zipdownload_export_icon_jsonld_url') ?? ''),
-            'zipdownload_export_manifest_property' => (string) ($siteSettings->get('zipdownload_export_manifest_property') ?? ''),
+
           ]);
         }
         catch (\Throwable $e) {
@@ -178,7 +178,7 @@ class Module extends AbstractModule {
           'zipdownload_export_block_title_en',
           'zipdownload_export_icon_iiif_url',
           'zipdownload_export_icon_jsonld_url',
-          'zipdownload_export_manifest_property',
+
         ] as $name) {
           $inputFilter->add([
             'name' => $name,

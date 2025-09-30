@@ -17,29 +17,13 @@ try {
   $jsonLdUrl = '';
 }
 
-// IIIF Manifest for items only
+// IIIF Manifest for items only (fixed internal URL)
 $manifestUrl = '';
-$siteManifestProp = trim((string) $this->siteSetting('zipdownload_export_manifest_property'));
-if ($siteManifestProp === '') { $siteManifestProp = trim((string) $this->siteSetting('zipdownload.export_manifest_property')); }
 try {
   if (method_exists($resource, 'resourceName') && $resource->resourceName() === 'items') {
     $ver = (string) $this->setting('iiifserver_manifest_default_version', '3');
     $ver = in_array($ver, ['2', '3'], true) ? $ver : '3';
     $manifestUrl = '/iiif/' . $ver . '/' . (int) $resource->id() . '/manifest';
-    // If a site setting for manifest property is set, try to override.
-    if ($siteManifestProp !== '') {
-      try {
-        // Property is like prefix:term.
-        $prop = $siteManifestProp;
-        $value = '';
-        if (method_exists($resource, 'value')) {
-          $valObj = $resource->value($prop, ['type' => 'uri']);
-          if (!$valObj) { $valObj = $resource->value($prop, ['type' => 'literal']); }
-          if ($valObj) { $value = (string) $valObj; }
-        }
-        if ($value !== '') { $manifestUrl = $value; }
-      } catch (\Throwable $e) { /* ignore */ }
-    }
   }
 } catch (\Throwable $e) {
   $manifestUrl = '';

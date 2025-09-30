@@ -9,6 +9,7 @@
 - Templates: Updated module and foundation_tsukuba2025 theme templates to honor localized titles based on current locale.
 - Admin form: Prefill and input filters updated to support the new keys.
 - Client/UI polish: Download list rows align checkbox and label on a single line and center them vertically. Media IDs are no longer displayed (kept only in data attributes).
+ - Removed setting: `zipdownload_export_manifest_property` and related override logic. IIIF Manifest link now always uses the internal `/iiif/{ver}/{item_id}/manifest` URL.
 
 日本語サマリ:
 - サイト設定: ダウンロード／エクスポート見出しに日英別フィールドを追加。
@@ -18,6 +19,7 @@
 - テンプレート: モジュールおよび foundation_tsukuba2025 テーマでローカライズ見出しを参照。
 - 管理UI: 新フィールドの初期値設定と入力フィルタを追加。
 - UI調整: ダウンロードリストの各行でチェックボックスとラベルを横一列・上下中央に配置。メディアIDは非表示（data属性のみ保持）。
+ - 設定削除: `zipdownload_export_manifest_property` を廃止し、上書きロジックを削除。IIIF Manifest は常に内部の `/iiif/{ver}/{item_id}/manifest` を使用。
 
 ## 0.3.1 (2025-09-30)
 

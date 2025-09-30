@@ -135,19 +135,6 @@ class SiteSettingsFieldset extends Fieldset {
       ],
     ]);
 
-    // Manifest property term to override IIIF manifest URL.
-    // Example: dcterms:source.
-    $this->add([
-      'name' => 'zipdownload_export_manifest_property',
-      'type' => Text::class,
-      'options' => [
-        'label' => 'Manifest property term',
-      ],
-      'attributes' => [
-        'id' => 'zipdownload_export_manifest_property',
-        'placeholder' => 'e.g. dcterms:source',
-      ],
-    ]);
   }
 
 }
