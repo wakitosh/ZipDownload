@@ -131,20 +131,59 @@ Notes:
 
 ### 概要
 
-ZipDownload は、ZipStream-PHP を用いてアイテムに紐づくメディアをストリーミングで ZIP するモジュールです。IIIF を優先し、必要に応じてローカルオリジナル／サムネイルにフォールバックします。進捗はトークン単位の JSON で管理し、クライアントからポーリング可能です。
+このモジュールは、ZipStream-PHP を用いてアイテムに紐づく選択メディアをストリーミングで ZIP 配信します。IIIF を優先し、必要に応じてローカルのオリジナルファイル、さらに大きめサムネイルへとフォールバックします。進捗はトークンごとの JSON で管理され、クライアントからポーリングできます。大容量の書き出しでもディスクに一時ZIPを作成せずに配信できます。
+
+### 機能
+
+- ZipStream-PHP によるオンデマンドZIP配信（モジュール内 vendor に同梱）
+- IIIF 画像を優先し、なければローカル原本、最後に大サムネイル
+- ダウンロードごとのトークンと一時JSONによるサーバーサイド進捗
+- 管理UIから調整できる保守的なサーバー制限（メモリ/IO負荷を抑制）。512M/1G/10G のような人にやさしい単位で設定可
 
 ### エンドポイント
 
-- POST `/zip-download/item/:id` — ZIP のストリーミング開始（`media_ids`, `progress_token` 必須）
-- GET `/zip-download/status?token=...` — 進捗 JSON を取得
-- POST/GET `/zip-download/estimate` — サイズ／件数の概算
-- POST `/zip-download/cancel` — 実行中 ZIP のキャンセル
+- POST /zip-download/item/:id — アイテム :id のZIP配信を開始（POST: `media_ids`, `progress_token`, 任意で `estimated_total_bytes`/`estimated_file_count`）
+- GET /zip-download/status?token=TOKEN — トークンの進捗JSONを取得
+- POST/GET /zip-download/estimate — `media_ids` に対する `total_bytes` / `total_files` の概算
+- POST /zip-download/cancel — 実行中ZIPのキャンセル（`progress_token` 必須）
 
-サイト配下のルート（`/s/:site-slug/zip-download/...`）にも対応しています。
+注: サイト配下のルート `/s/:site-slug/zip-download/...` にも対応しています。
+
+### 使い方
+
+1. `/zip-download/estimate` に `media_ids`（csv または配列）を渡して概算サイズ/件数を取得
+2. ランダムな `progress_token` を生成し、`/zip-download/item/:id` に `media_ids` と `progress_token` をPOSTして配信を開始
+3. `/zip-download/status?token=TOKEN` をポーリングして `status`, `bytes_sent`, `total_bytes`, `started_at` を取得
+
+### サーバー側の制限と調整
+
+既定値は以下の通り（`ZipController`の定数、管理画面で上書き可能）：
+
+- `MAX_CONCURRENT_DOWNLOADS_GLOBAL` = 1
+- `MAX_BYTES_PER_DOWNLOAD` = 3GB
+- `MAX_TOTAL_ACTIVE_BYTES` = 6GB
+- `MAX_FILES_PER_DOWNLOAD` = 1000
+- `PROGRESS_TOKEN_TTL` = 7200 秒
+
+管理画面の ZipDownload 設定から変更できます。バイト単位は `512M`、`1G`、`10G` のような表記に対応（K/KB, M/MB, G/GB, T/TB）。コードレベルで既定を変える場合は `modules/ZipDownload/src/Controller/ZipController.php` を編集してください。
+
+### リソースページブロック（UI連携）
+
+管理画面（外観 > サイト > [サイト] > Pages > Configure resource pages）から、以下のブロックをアイテムページに配置できます。
+
+- `exportLinks` — アイテムのエクスポートリンク（IIIF Manifest、JSON‑LDなど）を表示。レンダリングはアクティブなテーマに委ねつつ、設定はサイト単位
+- `downloadPanel` — メディア選択と ZIP ダウンロード UI。上記エンドポイントと連携
+
+テーマは以下のテンプレートを提供できます：
+
+- `view/common/resource-page-blocks/export-links.phtml`
+- `view/common/resource-page-blocks/download-panel.phtml`
+
+テーマ `config/theme.ini` の `resource_page_blocks` に標準配置を定義することも可能です。サイトごとに管理画面で上書きできます。
 
 ### サイト設定（ZipDownload セクション）
 
-ダウンロード／エクスポートの見出し・リンク・アイコンは「サイト設定 > ZipDownload」で管理します（テーマ非依存）。主なキー：
+ダウンロード/エクスポートの見出しやリンクはサイトごとに設定します（外観 > サイト > [サイト] > Settings）。アンダースコアのキー：
 
 - `zipdownload_download_panel_title`
 - `zipdownload_download_terms_url`
@@ -153,28 +192,49 @@ ZipDownload は、ZipStream-PHP を用いてアイテムに紐づくメディア
 - `zipdownload_export_icon_iiif_url`
 - `zipdownload_export_icon_jsonld_url`
 
+アイコンURL未設定時は既定アイコンを使用し、24×24px で表示します。
 
-アイコン URL を未設定の場合は既定のアイコンを使用し、常に 24×24px で表示します。
+### 注意事項
 
-### リソースページブロック（UI 連携）
+- 進捗は `sys_get_temp_dir()` 配下の一時ファイルで保持します。マルチインスタンスでは共有ストア（Redis/DB等）への置換や分散セマフォを検討してください。
+- `estimateAction` はメタデータのファイルサイズ、ローカルFSサイズ、IIIFのHEAD要求（短いタイムアウト）を順に試みます。
+- ストリーミングのため `zlib.output_compression` を無効化します。PHPの出力バッファやリバースプロキシのバッファ設定にご注意ください。
 
-- `exportLinks` — IIIF Manifest / JSON‑LD などのエクスポートリンクを表示
-- `downloadPanel` — メディア選択と ZIP ダウンロード UI を表示
+### ダウンロードログ（管理）
 
-外観 > サイト > [対象サイト] > Pages > Configure resource pages から配置できます。
+各ダウンロードのログを `zipdownload_log` テーブルに保存します（初回に自動作成）。
 
-### サーバー側の制限と調整
+- 参照: 管理 > 左ナビ「ZipDownload Logs」または `/admin/zip-download/logs`
+- 機能:
+	- 画面での閲覧（ページネーション、フィルタ）
+	- エクスポート `/admin/zip-download/logs/export`（CSV/TSV、Excel向けCSVあり）
+	- クリア `/admin/zip-download/logs/clear`（管理者のみ、恒久削除）
+- 主な列:
+	- `started_at`, `finished_at`, `duration_ms`, `status`
+	- `item_id`, `item_title`, `media_ids`, `media_count`
+	- `bytes_total`, `bytes_sent`
+	- `client_ip`, `user_id`, `user_email`, `user_agent`, `site_slug`
+	- `progress_token`, `error_message`, `slot_index`
 
-同時実行数やサイズ／件数上限、トークン TTL などは管理画面のモジュール設定から調整可能です。`512M`, `1G`, `10G` などの人にやさしい単位を受け付けます。
+プライバシー/保管:
+- ログにはクライアントIPやユーザー識別子が含まれる場合があります。ポリシーに応じて保管期間の短縮やエクスポート制限をご検討ください。不要になったログは「Clear」で削除できます。
+- 進捗ファイル（JSON）はTTLで自動清掃されます。DBのログは手動で削除するまで残ります。
 
-### ダウンロードログ（管理者向け）
+### セキュリティ
 
-各ダウンロードの実行情報を DB テーブル（`zipdownload_log`）に記録します（初回ブート時に自動作成）。
+- 指定アイテムのメディアのみを含めます。
+- 設定したサイズ/件数/同時実行の上限を超える要求は 413/429 で拒否します。
 
-- 参照: 管理画面の左ナビ「ZipDownload Logs」または `/admin/zip-download/logs`
-- 機能: 画面での閲覧、CSV エクスポート（`/admin/zip-download/logs/export`）、全削除（`/admin/zip-download/logs/clear`）
-- 主な項目: `started_at`, `finished_at`, `duration_ms`, `status`, `item_id`, `media_count`, `bytes_total/bytes_sent`, `client_ip`, `user_id/email`, `user_agent`, `site_slug`, `progress_token`, `error_message` など
+### トラブルシュート
 
-注意（プライバシー／保管）:
-- ログにはクライアント IP やユーザー情報が含まれることがあります。運用ポリシーに応じて保管期間を短くする／エクスポートを制限するなどをご検討ください。不要になったログは「Clear」で削除できます。
-- 進捗 JSON は TTL で自動的にクリーンアップされますが、DB のログは明示的に削除するまで残ります。
+- 拒否された場合はログを確認し、上限設定の調整やリクエストの分割をご検討ください。
+- Webサーバ/プロキシのタイムアウトに注意してください。長時間のストリーミングは短いタイムアウトで中断されることがあります。
+
+### 開発のヒント
+
+- マルチサーバ環境では、進捗ストアを中央集約（Redis/DB）に置き換え、同時ダウンロード制限に分散セマフォを使うことを検討してください。
+- IIIFへの負荷が高い場合は、内部画像プロキシの導入を検討してください。
+
+### ライセンス
+
+ホストする Omeka S と同一のライセンスに従います。
