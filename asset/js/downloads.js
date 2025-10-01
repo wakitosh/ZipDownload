@@ -9,6 +9,34 @@
     }
     function qs(el, sel) { return el.querySelector(sel); }
     function qsa(el, sel) { return Array.from(el.querySelectorAll(sel)); }
+    function toURL(u) { try { return new URL(String(u), window.location.origin); } catch (e) { return null; } }
+    function isCrossOrigin(u) { const url = toURL(u); if (!url) return false; return url.origin !== window.location.origin; }
+    // Derive sibling endpoint (/status or /cancel) from a base URL reliably,
+    // even when the base contains query strings. Operates on pathname only.
+    function deriveEndpoint(base, target) {
+        try {
+            const u = new URL(String(base), window.location.origin);
+            let p = u.pathname || '';
+            // Replace trailing /item/:id with /{target}, preserving site prefix if any.
+            if (/\/item\/\d+\/?$/i.test(p)) {
+                p = p.replace(/\/item\/\d+\/?$/i, '/' + String(target));
+            } else if (/\/zip-download\/item\/\d+\/?$/i.test(p)) {
+                p = p.replace(/\/zip-download\/item\/\d+\/?$/i, '/zip-download/' + String(target));
+            } else {
+                // Fallbacks: ensure we end up under /zip-download/{target}
+                p = p.replace(/\/zip-download\/?$/i, '/zip-download/' + String(target));
+                if (!/\/zip-download\/(status|cancel)$/i.test(p)) {
+                    p = '/zip-download/' + String(target);
+                }
+            }
+            u.pathname = p;
+            // Caller will set specific search params; clear existing query.
+            u.search = '';
+            return u;
+        } catch (e) {
+            return null;
+        }
+    }
     function notify(panel, msg, timeout = 7000) {
         try {
             let container = qs(panel, '.download-panel__notify');
@@ -79,14 +107,23 @@
         progress.textContent = t(panel, 'ZIPを作成しています…', 'Building ZIP…');
         function normalizeUrl(u) { if (!u) return ''; return String(u).trim().replace(/\s+/g, ''); }
 
+        // Default to same-origin-only to avoid affecting remote environments.
+        // data-zip-same-origin-only="0" または "false" のときのみクロスオリジンも許可。
+        const sooAttr = (panel.getAttribute('data-zip-same-origin-only') || '').toLowerCase();
+        const sameOriginOnly = !(sooAttr === '0' || sooAttr === 'false');
         const estimateEndpointRaw = panel.getAttribute('data-zip-endpoint') || '/zip-download/estimate';
-        const estimateUrl = normalizeUrl(estimateEndpointRaw).replace(/\/item\/\d+\/?$/i, '/estimate') || '/zip-download/estimate';
+        let estimateUrl = normalizeUrl(estimateEndpointRaw).replace(/\/item\/\d+\/?$/i, '/estimate') || '/zip-download/estimate';
+        // Prefer local same-origin estimate endpoint to avoid affecting remote envs.
+        if (isCrossOrigin(estimateUrl) || !estimateUrl) {
+            estimateUrl = '/zip-download/estimate';
+        }
         let estimated = null;
         let userCanceled = false;
         try {
+            const cred = isCrossOrigin(estimateUrl) ? 'omit' : 'include';
             const estRes = await fetch(estimateUrl, {
                 method: 'POST',
-                credentials: 'include',
+                credentials: cred,
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
                 body: new URLSearchParams({ media_ids: mediaIds.join(',') }).toString(),
             });
@@ -104,22 +141,34 @@
         const epGlobal = normalizeUrl(panel.getAttribute('data-zip-endpoint-global') || '');
         const epExplicit = normalizeUrl(endpoint || '');
         const fallbackItem = `/zip-download/item/${encodeURIComponent(itemId)}`;
-        const candidates = [epGlobal, epExplicit, epSite, fallbackItem].map(v => v && String(v)).filter((v, i, arr) => v && arr.indexOf(v) === i);
+        // Build candidates and prefer same-origin first.
+        let candidates = [epExplicit, epSite, fallbackItem, epGlobal].map(v => v && String(v)).filter((v, i, arr) => v && arr.indexOf(v) === i);
+        const same = candidates.filter(u => !isCrossOrigin(u));
+        const cross = candidates.filter(u => isCrossOrigin(u));
+        candidates = sameOriginOnly ? same : [...same, ...cross];
 
         let res = null, lastErr = null, lastJsonErr = null, lastRetryAfter = null, chosenUrl = null, fetchController = null;
+        let brokeOnLocalError = false;
         for (const url of candidates) {
             try {
                 fetchController = new AbortController();
-                res = await fetch(url, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' }, body: params.toString(), signal: fetchController.signal });
+                const cred = isCrossOrigin(url) ? 'omit' : 'include';
+                res = await fetch(url, { method: 'POST', credentials: cred, headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' }, body: params.toString(), signal: fetchController.signal });
                 const ct = String(res.headers.get('content-type') || '');
                 if (res.ok && ct.includes('zip')) { chosenUrl = normalizeUrl(url); break; }
                 if (ct.includes('application/json')) {
                     try {
                         const j = await res.json();
                         lastJsonErr = j; lastRetryAfter = j.retry_after || null; lastErr = new Error(j.error || j.message || ('Server ' + res.status));
+                        // If same-origin returned an error (e.g., 429 slot limit), stop here.
+                        if (!isCrossOrigin(url)) { brokeOnLocalError = true; }
                     } catch (e) { lastErr = new Error('Bad response: ' + res.status + ' ' + ct); }
-                } else { lastErr = new Error('Bad response: ' + res.status + ' ' + ct); }
+                } else {
+                    lastErr = new Error('Bad response: ' + res.status + ' ' + ct);
+                    if (!isCrossOrigin(url)) { brokeOnLocalError = true; }
+                }
             } catch (e) { lastErr = e; }
+            if (brokeOnLocalError) { res = null; break; }
             res = null;
         }
 
@@ -146,11 +195,10 @@
         const pollStatus = async () => {
             try {
                 const baseForStatus = chosenUrl || normalizeUrl(panel.getAttribute('data-zip-endpoint') || '/zip-download/status');
-                let statusBase = normalizeUrl(baseForStatus).replace(/\/item\/\d+\/?$/i, '/status'); statusBase = statusBase.replace(/%20+/g, '');
-                let statusUrl = null;
-                try { statusUrl = new URL(statusBase, window.location.origin); statusUrl.searchParams.set('token', token); statusUrl = statusUrl.toString().replace(/%20+/g, ''); }
-                catch (e) { statusUrl = statusBase.replace(/\s+/g, '') + '?token=' + encodeURIComponent(token); }
-                const r = await fetch(statusUrl, { credentials: 'include' }); if (!r.ok) return null; return await r.json();
+                const u = deriveEndpoint(baseForStatus, 'status');
+                const statusUrl = (u ? (u.searchParams.set('token', token), u.toString()) : ('/zip-download/status?token=' + encodeURIComponent(token))).replace(/%20+/g, '');
+                const cred = isCrossOrigin(statusUrl) ? 'omit' : 'include';
+                const r = await fetch(statusUrl, { credentials: cred }); if (!r.ok) return null; return await r.json();
             } catch (e) { return null; }
         };
 
@@ -204,9 +252,11 @@
         const onCancel = async () => {
             try {
                 const baseForCancel = chosenUrl || panel.getAttribute('data-zip-endpoint') || '/zip-download/cancel';
-                const cancelEndpoint = String(baseForCancel).replace(/\/item\/\d+\/?$/i, '/cancel');
+                const u = deriveEndpoint(baseForCancel, 'cancel');
+                const cancelEndpoint = u ? u.toString() : '/zip-download/cancel';
                 try { if (fetchController && typeof fetchController.abort === 'function') fetchController.abort(); } catch (e) { }
-                const resp = await fetch(cancelEndpoint, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' }, body: new URLSearchParams({ progress_token: token }).toString() });
+                const cred = isCrossOrigin(cancelEndpoint) ? 'omit' : 'include';
+                const resp = await fetch(cancelEndpoint, { method: 'POST', credentials: cred, headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' }, body: new URLSearchParams({ progress_token: token }).toString() });
                 if (resp.ok) { userCanceled = true; polling = false; progress.textContent = t(panel, 'ダウンロードがキャンセルされました。', 'Download canceled.'); }
             } catch (e) { console.error('Cancel request error', e); }
         };

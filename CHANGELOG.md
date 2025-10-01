@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.3.5 (2025-10-01)
+
+- Client: Default to same-origin-only for ZIP endpoints. Cross-origin fallback is disabled by default; can be enabled per panel via `data-zip-same-origin-only="0"`.
+- Client: When same-origin `/zip-download/item` returns an error (e.g., 429 slot busy), stop and show the message instead of falling back to other origins.
+- Client: Robust URL derivation for `/status` and `/cancel` even when the base URL has query strings or lives under a site-scoped path.
+- Server: `/zip-download/status` now sends no-store/no-cache headers to prevent stale progress JSON being cached by browsers/proxies.
+- Server: PHP 8 compatibility — add strict signature to `ZipDownloadProgressFilter::filter()` to eliminate deprecation warnings in responses.
+- Logs: Ensure `item_title` is recorded for delayed/early error logs so labels consistently show "ID + title" across statuses.
+
+日本語サマリ:
+- クライアント: 既定で同一オリジンのみを使用。クロスオリジンへのフォールバックは無効（必要な場合は `data-zip-same-origin-only="0"` で有効化）。
+- クライアント: 同一オリジンの `/zip-download/item` がエラー（例 429）を返した場合は、その時点で中止してメッセージを表示し、他オリジンへはフォールバックしない。
+- クライアント: `/status` と `/cancel` の導出を堅牢化（クエリ付きURLやサイト配下のパスでも確実に派生）。
+- サーバー: `/zip-download/status` に no-store/no-cache ヘッダを追加し、進捗JSONのキャッシュを防止。
+- サーバー: PHP 8 互換 — `ZipDownloadProgressFilter::filter()` に厳密なシグネチャを付与し、レスポンスへの非推奨警告混入を解消。
+- ログ: delayed/早期エラーのログにも `item_title` を記録し、全ステータスで「ID+タイトル」表記を統一。
+
+## 0.3.4 (2025-10-01)
+
+- Progress accuracy: `bytes_sent` is now updated using actual streamed bytes.
+	- Implemented a lightweight PHP stream filter to count bytes while streaming local files into the ZIP and update progress meta in near real-time.
+	- IIIF-added images now increment progress by their actual payload sizes instead of a per-file estimate.
+	- Finalization keeps `canceled` status when applicable and avoids overriding with `done`; zero-file outputs are marked `rejected`.
+- Logs: Fixed cases where done/canceled rows could retain estimated totals, leading to confusing entries like “6,000,000 / 108,000,000”.
+
+日本語サマリ:
+- 進捗精度: `bytes_sent` を実測バイトで更新するように変更。
+	- ローカルファイルのZIP書き込みにストリームフィルタを挿入し、転送中に実測を逐次カウント。
+	- IIIF 追加分も1ファイルあたりの概算ではなく、取得した実データのサイズで加算。
+	- 終了処理でキャンセル状態を維持（`done` で上書きしない）。ファイルが一つも追加されない場合は `rejected`。
+- ログ: done/canceled なのに見積もり値のまま残る（例「6,000,000 / 108,000,000」）不整合を解消。
+
 ## 0.3.3 (2025-09-30)
 
 - Admin Logs: Added option to clear logs between two date/times (After ~ Before) in addition to existing "Up to now" and "Before date/time".
