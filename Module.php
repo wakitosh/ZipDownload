@@ -71,48 +71,50 @@ class Module extends AbstractModule {
     $acl->allow(NULL, [ZipController::class]);
     // Admin-only access to logs UI.
     $acl->allow(['global_admin', 'site_admin'], [LogsController::class]);
-    // Temporary debug: log route matching info for zip-download requests.
-    // This helps diagnose why the site child route under /s/:site-slug is not
-    // being matched at runtime. Remove or lower verbosity after debugging.
-    $logger = NULL;
-    if ($services->has('Omeka\\Logger')) {
-      $logger = $services->get('Omeka\\Logger');
-    }
-    $event->getApplication()->getEventManager()->attach(MvcEvent::EVENT_ROUTE, function (MvcEvent $ev) use ($logger) {
-      try {
-        $match = $ev->getRouteMatch();
-        if (!$match) {
-          if ($logger) {
-            $request = $ev->getRequest();
-            $uri = method_exists($request, 'getUri') ? (string) $request->getUri() : '';
-            $logger->info('ZipDownload route debug: no route match for request ' . $uri);
+    // Route debug logging (disabled by default). Set $enableRouteDebug to TRUE
+    // temporarily if you need to troubleshoot routing.
+    $enableRouteDebug = FALSE;
+    if ($enableRouteDebug) {
+      $logger = NULL;
+      if ($services->has('Omeka\\Logger')) {
+        $logger = $services->get('Omeka\\Logger');
+      }
+      $event->getApplication()->getEventManager()->attach(MvcEvent::EVENT_ROUTE, function (MvcEvent $ev) use ($logger) {
+        try {
+          $match = $ev->getRouteMatch();
+          if (!$match) {
+            if ($logger) {
+              $request = $ev->getRequest();
+              $uri = method_exists($request, 'getUri') ? (string) $request->getUri() : '';
+              $logger->info('ZipDownload route debug: no route match for request ' . $uri);
+            }
+            return;
           }
-          return;
+          $name = (string) $match->getMatchedRouteName();
+          // Only log when zip-download appears in the route name
+          // or in the path.
+          $request = $ev->getRequest();
+          $path = method_exists($request, 'getUri') ? (string) $request->getUri() : '';
+          if (strpos($name, 'zip-download') !== FALSE || strpos($path, '/zip-download') !== FALSE) {
+            $params = $match->getParams();
+            if ($logger) {
+              $logger->info('ZipDownload route debug: matched=' . $name . ' params=' . json_encode($params));
+            }
+            else {
+              error_log('ZipDownload route debug: matched=' . $name . ' params=' . json_encode($params));
+            }
+          }
         }
-        $name = (string) $match->getMatchedRouteName();
-        // Only log when zip-download appears in the route name or in the path.
-        $request = $ev->getRequest();
-        $path = method_exists($request, 'getUri') ? (string) $request->getUri() : '';
-        if (strpos($name, 'zip-download') !== FALSE || strpos($path, '/zip-download') !== FALSE) {
-          $params = $match->getParams();
+        catch (\Throwable $e) {
           if ($logger) {
-            $logger->info('ZipDownload route debug: matched=' . $name . ' params=' . json_encode($params));
+            $logger->err('ZipDownload route debug error: ' . $e->getMessage());
           }
           else {
-            error_log('ZipDownload route debug: matched=' . $name . ' params=' . json_encode($params));
+            error_log('ZipDownload route debug error: ' . $e->getMessage());
           }
         }
-
-      }
-      catch (\Throwable $e) {
-        if ($logger) {
-          $logger->err('ZipDownload route debug error: ' . $e->getMessage());
-        }
-        else {
-          error_log('ZipDownload route debug error: ' . $e->getMessage());
-        }
-      }
-    }, 100);
+      }, 100);
+    }
   }
 
   /**
