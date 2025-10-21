@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.7 (2025-10-21)
+
+- Client (Mirador): Insert a "Terms of use / 利用条件" link into Mirador's Download dialog actions (left side) when available.
+	- Only when a ZipDownload `.download-panel` is present and a site-level Terms link URL is configured.
+	- Language switches automatically (JA: 「利用条件」 / EN: "Terms of use").
+	- Uses MutationObserver to detect the dialog; avoids duplicate insertion per dialog instance.
+	- Styling: left margin 16px, underline; buttons stay aligned to the right.
+
+日本語サマリ:
+- クライアント（Mirador）: Mirador のダウンロードダイアログのアクション行の左側に「利用条件 / Terms of use」リンクを自動挿入。
+	- ZipDownload の `.download-panel` があり、サイト設定で Terms URL が設定されている場合のみ。
+	- 言語は自動切替（JA:「利用条件」/ EN: "Terms of use"）。
+	- ダイアログ生成を MutationObserver で検出し、同一ダイアログでの重複挿入を防止。
+	- スタイル: 左マージン 16px、下線。右側のボタン配置は維持。
+
 ## 0.3.6 (2025-10-21)
 
 - Server (i18n): Ensure English messages are used by default and translated to Japanese only when site locale is JA.

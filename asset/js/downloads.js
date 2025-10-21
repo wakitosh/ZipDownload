@@ -345,4 +345,75 @@
         updateState(panel);
     }
     document.addEventListener('DOMContentLoaded', () => { document.querySelectorAll('.download-panel').forEach(init); });
+
+    // Insert Terms link into Mirador's download dialog actions when available.
+    // Conditions:
+    // - A .download-panel exists and provides data-terms-url (non-empty)
+    // - Mirador's MUI dialog appears with a title like "Download" / "ダウンロード"
+    // - Do nothing if already inserted for a given dialog instance
+    function initMiradorTermsLink() {
+        try {
+            const panel = document.querySelector('.download-panel');
+            if (!panel) return; // No panel => our module likely not active here
+            const termsUrl = (panel.getAttribute('data-terms-url') || '').trim();
+            if (!termsUrl) return; // No terms URL configured
+            const loc = (panel.getAttribute('data-locale') || '').toLowerCase();
+            const isJa = loc.startsWith('ja');
+            const linkText = isJa ? '利用条件' : 'Terms of use';
+            const titleJa = 'ダウンロード';
+            const titleEn = 'Download';
+            const isTargetDialog = (root) => {
+                try {
+                    const titleEl = root.querySelector('.MuiDialogTitle-root h2, .MuiDialogTitle-root h3');
+                    if (!titleEl) return false;
+                    const text = (titleEl.textContent || '').trim();
+                    return (text === titleEn || text === titleJa || text.toLowerCase() === titleEn.toLowerCase());
+                } catch (e) { return false; }
+            };
+            const markInserted = (el) => { try { el.setAttribute('data-zip-terms-inserted', '1'); } catch (e) { } };
+            const alreadyInserted = (el) => (el && el.getAttribute('data-zip-terms-inserted') === '1');
+
+            const attachToActions = (actionsEl) => {
+                try {
+                    if (!actionsEl || alreadyInserted(actionsEl)) return;
+                    const dialogRoot = actionsEl.closest('.MuiDialog-paper');
+                    if (!dialogRoot || !isTargetDialog(dialogRoot)) return;
+                    // Build link styled similarly to MUI links in the dialog list.
+                    const a = document.createElement('a');
+                    a.className = 'MuiTypography-root MuiLink-root MuiLink-underlineAlways MuiTypography-body1 MuiTypography-colorPrimary zip-terms-link';
+                    a.href = termsUrl; a.target = '_blank'; a.rel = 'noopener'; a.textContent = linkText;
+                    a.style.marginLeft = '16px'; a.style.marginRight = 'auto'; a.style.textDecoration = 'underline';
+                    // Insert as the first child so buttons stay on the right.
+                    if (actionsEl.firstChild) actionsEl.insertBefore(a, actionsEl.firstChild); else actionsEl.appendChild(a);
+                    markInserted(actionsEl);
+                } catch (e) { /* ignore */ }
+            };
+
+            const scanNow = () => {
+                document.querySelectorAll('.MuiDialogActions-root.MuiDialogActions-spacing').forEach(attachToActions);
+            };
+
+            const mo = new MutationObserver((muts) => {
+                for (const m of muts) {
+                    if (m.type !== 'childList') continue;
+                    m.addedNodes && m.addedNodes.forEach(node => {
+                        try {
+                            const el = (node && node.nodeType === 1) ? node : null;
+                            if (!el) return;
+                            if (el.matches && el.matches('.MuiDialogActions-root.MuiDialogActions-spacing')) {
+                                attachToActions(el);
+                            } else {
+                                const found = el.querySelector && el.querySelector('.MuiDialogActions-root.MuiDialogActions-spacing');
+                                if (found) attachToActions(found);
+                            }
+                        } catch (e) { }
+                    });
+                }
+            });
+            mo.observe(document.body, { childList: true, subtree: true });
+            // In case the dialog is already open, scan immediately once.
+            scanNow();
+        } catch (e) { /* ignore */ }
+    }
+    try { document.addEventListener('DOMContentLoaded', initMiradorTermsLink); } catch (e) { }
 })();

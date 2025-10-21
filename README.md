@@ -66,6 +66,19 @@ Notes:
 
  You may also define default placements in a theme’s `config/theme.ini` under `resource_page_blocks` (for example, add both blocks to the Item “right” region). Admins can override placements per site.
 
+ ### Mirador integration (Download dialog)
+
+ When an Item page uses Mirador and the Mirador Download dialog is opened, this module automatically inserts a "Terms of use" link into the dialog action bar (left side) if a Terms URL is configured at the site level.
+
+ - Prerequisites:
+	 - The page includes the ZipDownload `downloadPanel` block (i.e., `.download-panel` is present).
+	 - Site setting “Terms link URL (optional)” (`zipdownload_download_terms_url`) is set.
+ - Behavior:
+	 - The link label follows the current locale (EN: "Terms of use", JA: 「利用条件」).
+	 - The link is inserted on the left side of the Mirador dialog actions with a 16px left margin and underline, while Mirador’s buttons remain aligned on the right.
+	 - The dialog is detected via MutationObserver; duplicate insertion is avoided.
+
+
  ### Site settings (ZipDownload section)
 
  The Download/Export panel texts and links are configured per site from the admin UI (Appearance > Sites > [Your Site] > Settings). Keys (underscored):
@@ -180,6 +193,18 @@ Notes:
 - `view/common/resource-page-blocks/download-panel.phtml`
 
 テーマ `config/theme.ini` の `resource_page_blocks` に標準配置を定義することも可能です。サイトごとに管理画面で上書きできます。
+
+### Mirador 連携（ダウンロードダイアログ）
+
+アイテムページで Mirador を使用し、Mirador の Download ダイアログを開いたとき、サイト設定で「Terms link URL (optional)」が設定されていれば、ダイアログ下部のアクション行の左側に「利用条件」リンクを自動挿入します。
+
+- 前提条件:
+	- ページに ZipDownload の `downloadPanel` ブロック（`.download-panel`）が含まれていること
+	- サイト設定で `zipdownload_download_terms_url`（Terms link URL）が設定されていること
+- 挙動:
+	- ラベルはロケールに応じて自動切替（EN: "Terms of use" / JA: 「利用条件」）
+	- Mirador の右側ボタン群はそのまま、左側に下線付きのリンクを 16px の左マージンで挿入
+	- MutationObserver によりダイアログ生成を検出し、同一ダイアログへの重複挿入を防止
 
 ### サイト設定（ZipDownload セクション）
 
