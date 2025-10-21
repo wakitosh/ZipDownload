@@ -249,9 +249,7 @@ class ZipController extends AbstractActionController {
         'error_message' => 'No slot available',
       ]);
       header('Content-Type: application/json', TRUE, 429);
-      $msg = $this->currentLocaleIsJa()
-        ? 'すべてのダウンロード枠が使用中です。少し待ってからもう一度お試しください。'
-        : 'All download slots are currently in use. Please wait a moment and try again.';
+      $msg = $this->translateMessage('All download slots are currently in use. Please wait a moment and try again.');
       echo json_encode([
         'error' => $msg,
         'retry_after' => 60,
@@ -377,9 +375,7 @@ class ZipController extends AbstractActionController {
         'error_message' => 'Active bytes limit',
       ]);
       header('Content-Type: application/json', TRUE, 429);
-      $msg = $this->currentLocaleIsJa()
-        ? 'サーバーが他の大きなダウンロードを処理中です。少し待ってからもう一度お試しください。'
-        : 'The server is handling other large downloads. Please wait a moment and try again.';
+      $msg = $this->translateMessage('The server is handling other large downloads. Please wait a moment and try again.');
       echo json_encode([
         'error' => $msg,
         'retry_after' => 60,
@@ -1359,6 +1355,8 @@ SQL;
       'Too many files requested' => '要求されたファイル数が多すぎます',
       'Missing token' => 'トークンが指定されていません',
       'Token not found' => 'トークンが見つかりません',
+      'All download slots are currently in use. Please wait a moment and try again.' => 'すべてのダウンロード枠が使用中です。少し待ってからもう一度お試しください。',
+      'The server is handling other large downloads. Please wait a moment and try again.' => 'サーバーが他の大きなダウンロードを処理中です。少し待ってからもう一度お試しください。',
     ];
     return $map[$message] ?? $message;
   }

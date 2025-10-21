@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.6 (2025-10-21)
+
+- Server (i18n): Ensure English messages are used by default and translated to Japanese only when site locale is JA.
+	- 429 No-slot-available: “All download slots are currently in use. Please wait a moment and try again.”
+	- 429 Large concurrent loads: “The server is handling other large downloads. Please wait a moment and try again.”
+	- Implementation consolidates message selection via `translateMessage()` to avoid hard-coded JA ternaries.
+
+日本語サマリ:
+- サーバー（i18n）: 既定を英語にし、サイトのロケールがJAのときのみ日本語メッセージを返すよう修正。
+	- 429 枠不足: 「すべてのダウンロード枠が使用中です。少し待ってからもう一度お試しください。」
+	- 429 大きな並列処理中: 「サーバーが他の大きなダウンロードを処理中です。少し待ってからもう一度お試しください。」
+	- 実装は `translateMessage()` に統一し、JA直書きの三項分岐を排除。
+
 ## 0.3.5 (2025-10-01)
 
 - Client: Default to same-origin-only for ZIP endpoints. Cross-origin fallback is disabled by default; can be enabled per panel via `data-zip-same-origin-only="0"`.
