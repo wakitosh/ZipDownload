@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.8 (2025-10-24)
+
+- Server (i18n): Ensure site-level locale takes precedence for server JSON messages even when requests hit non-site routes.
+	- Detect site context via route param `site-slug` when available; otherwise, parse Referer (`/s/:site-slug/...`) as a best-effort fallback.
+	- Respect an explicit `site_locale` request parameter (sent by the client) before any server-side inference.
+	- Use the detected site's `Settings\Site` locale for message selection; then fall back to translator delegated locale; finally to global settings.
+	- Fixes an issue where English sites could still receive Japanese messages like “すべてのダウンロード枠が使用中です…” when the global locale was JA.
+- Client: POST `/zip-download/item` now includes `site_locale` taken from the page context, ensuring robust i18n on servers without Referer.
+
+日本語サマリ:
+- サーバー（i18n）: サイト配下でないルートに来た場合でも、サイトのロケールを最優先で判定するように修正。
+	- 可能ならルートの `site-slug` を使用し、なければ Referer（`/s/:site-slug/...`）から推定。
+	- クライアントから `site_locale` を明示的に送信する場合は、それを最優先で尊重。
+	- 検出したサイトの `Settings\Site` のロケールを使用し、次に翻訳器の委譲ロケール、最後にグローバル設定を参照。
+	- グローバルが JA の環境で英語サイトにも日本語メッセージ（例「すべてのダウンロード枠が使用中です…」）が出る問題を解消。
+- クライアント: `/zip-download/item` のPOSTにページのロケール `site_locale` を追加し、Referer が送信されない環境でも確実に正しい言語を使用。
+
 ## 0.3.7 (2025-10-21)
 
 - Client (Mirador): Insert a "Terms of use / 利用条件" link into Mirador's Download dialog actions (left side) when available.

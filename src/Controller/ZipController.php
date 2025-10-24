@@ -1367,18 +1367,109 @@ SQL;
   private function currentLocaleIsJa(): bool {
     try {
       $services = $this->getEvent()->getApplication()->getServiceManager();
+
+      // 0) If the request explicitly provides a site locale, respect it.
+      try {
+        $explicit = '';
+        // Prefer POST, then GET; common parameter aliases supported.
+        $explicit = (string) $this->params()->fromPost('site_locale',
+          (string) $this->params()->fromPost('locale',
+            (string) $this->params()->fromPost('lang', '')));
+        if ($explicit === '') {
+          $explicit = (string) $this->params()->fromQuery('site_locale',
+            (string) $this->params()->fromQuery('locale',
+              (string) $this->params()->fromQuery('lang', '')));
+        }
+        if ($explicit !== '') {
+          $loc = strtolower($explicit);
+          if ($loc === 'ja' || strpos($loc, 'ja_') === 0 || strpos($loc, 'ja-') === 0) {
+            return TRUE;
+          }
+          // Explicitly non-JA locale provided => not JA.
+          return FALSE;
+        }
+      }
+      catch (\Throwable $e) {
+      }
+
+      // 1) Prefer site locale when a site context is known.
+      // Try to get site-slug from the current route or fallback to Referer.
+      $siteSlug = '';
+      try {
+        $siteSlug = (string) $this->params()->fromRoute('site-slug', '');
+      }
+      catch (\Throwable $e) {
+      }
+
+      if ($siteSlug === '') {
+        // Parse Referer like https://host/s/:slug/... to recover site context.
+        try {
+          $ref = isset($_SERVER['HTTP_REFERER']) ? (string) $_SERVER['HTTP_REFERER'] : '';
+          if ($ref !== '') {
+            $path = (string) parse_url($ref, PHP_URL_PATH);
+            if ($path) {
+              if (preg_match('#/s/([a-zA-Z0-9_-]+)(?:/|$)#', $path, $m)) {
+                $siteSlug = (string) $m[1];
+              }
+            }
+          }
+        }
+        catch (\Throwable $e) {
+        }
+      }
+
+      if ($siteSlug !== '') {
+        try {
+          $api = $services->get('Omeka\\ApiManager');
+          $site = $api->read('sites', ['slug' => $siteSlug])->getContent();
+          if ($site && method_exists($site, 'id')) {
+            $siteId = (int) $site->id();
+            $siteSettings = $services->get('Omeka\\Settings\\Site');
+            if (method_exists($siteSettings, 'setTargetId')) {
+              $siteSettings->setTargetId($siteId);
+            }
+            $loc = (string) $siteSettings->get('locale');
+            $loc = strtolower($loc);
+            if ($loc === 'ja' || strpos($loc, 'ja_') === 0) {
+              return TRUE;
+            }
+          }
+        }
+        catch (\Throwable $e) {
+          // Ignore site lookup failures and continue to other fallbacks.
+        }
+      }
+
+      // 2) Use translator's delegated locale (site-aware when in site route).
       try {
         $translator = $services->get('MvcTranslator');
-        if ($translator && method_exists($translator, 'getLocale')) {
-          $loc = (string) $translator->getLocale();
-          $loc = strtolower($loc);
-          if ($loc === 'ja' || strpos($loc, 'ja_') === 0) {
-            return TRUE;
+        if ($translator) {
+
+          // Prefer delegated translator locale set by Omeka's site bootstrap.
+          if (method_exists($translator, 'getDelegatedTranslator')) {
+            $deleg = $translator->getDelegatedTranslator();
+            if ($deleg && method_exists($deleg, 'getLocale')) {
+              $loc = (string) $deleg->getLocale();
+              $loc = strtolower($loc);
+              if ($loc === 'ja' || strpos($loc, 'ja_') === 0) {
+                return TRUE;
+              }
+            }
+          }
+          // Fallback to MvcTranslator::getLocale() if available.
+          if (method_exists($translator, 'getLocale')) {
+            $loc = (string) $translator->getLocale();
+            $loc = strtolower($loc);
+            if ($loc === 'ja' || strpos($loc, 'ja_') === 0) {
+              return TRUE;
+            }
           }
         }
       }
       catch (\Throwable $e) {
       }
+
+      // 3) Finally, fallback to global settings locale.
       try {
         $settings = $services->get('Omeka\\Settings');
         $loc = (string) $settings->get('locale');

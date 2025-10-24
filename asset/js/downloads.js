@@ -136,6 +136,9 @@
         const token = (crypto && crypto.randomUUID) ? crypto.randomUUID() : ('t' + Date.now() + Math.random().toString(36).slice(2, 8));
         params.set('progress_token', token);
         if (totalBytes > 0) params.set('estimated_total_bytes', String(totalBytes));
+        // Pass explicit site locale to the server so JSON messages use correct language
+        const siteLocale = (panel.getAttribute('data-locale') || '').trim();
+        if (siteLocale) params.set('site_locale', siteLocale);
 
         const epSite = normalizeUrl(panel.getAttribute('data-zip-endpoint-site') || '');
         const epGlobal = normalizeUrl(panel.getAttribute('data-zip-endpoint-global') || '');
