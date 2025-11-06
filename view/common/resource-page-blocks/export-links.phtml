@@ -17,13 +17,47 @@ try {
   $jsonLdUrl = '';
 }
 
-// IIIF Manifest for items only (fixed internal URL)
+// IIIF Manifest for items only — prefer IiifServer helper (CleanUrl-aware),
+// fallback to internal-id URL if helper is unavailable.
 $manifestUrl = '';
 try {
   if (method_exists($resource, 'resourceName') && $resource->resourceName() === 'items') {
     $ver = (string) $this->setting('iiifserver_manifest_default_version', '3');
-    $ver = in_array($ver, ['2', '3'], true) ? $ver : '3';
-    $manifestUrl = '/iiif/' . $ver . '/' . (int) $resource->id() . '/manifest';
+    $ver = in_array($ver, ['2', '3'], true) ? $ver : null; // let helper decide if invalid
+    try {
+      $iiifUrl = $this->plugin('iiifUrl');
+    } catch (\Throwable $e) {
+      $iiifUrl = null;
+    }
+    if ($iiifUrl) {
+      // Route '' lets the helper map items→iiifserver/manifest.
+      $manifestUrl = $iiifUrl($resource, '', $ver);
+      // If helper still returned an internal-id URL, try to rebuild with
+      // CleanUrl identifier directly as a stronger fallback.
+      if ($manifestUrl && preg_match('~/iiif/(2|3)/(?P<id>[^/]+)/manifest$~', $manifestUrl, $m)) {
+        $idInUrl = $m['id'] ?? '';
+        if ($idInUrl === (string) $resource->id()) {
+          try {
+            $getIds = $this->plugin('getIdentifiersFromResources');
+          } catch (\Throwable $e) {
+            $getIds = null;
+          }
+          if ($getIds) {
+            $ident = $getIds($resource, 'items');
+            if (is_string($ident) && $ident !== '') {
+              // Encode like IiifServer does for identifiers (keep colon unescaped).
+              $encoded = str_replace('%3A', ':', rawurlencode($ident));
+              $verEffective = $ver ?: ($m[1] ?? '3');
+              $manifestUrl = '/iiif/' . $verEffective . '/' . $encoded . '/manifest';
+            }
+          }
+        }
+      }
+    } else {
+      // Fallback: internal ID based URL.
+      $verFallback = $ver ?: '3';
+      $manifestUrl = '/iiif/' . $verFallback . '/' . (int) $resource->id() . '/manifest';
+    }
   }
 } catch (\Throwable $e) {
   $manifestUrl = '';

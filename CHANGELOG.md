@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.9 (2025-11-06)
+
+- Templates (export / download): Generate IIIF Manifest URLs via IiifServer helper and prefer CleanUrl identifiers when enabled.
+	- Use the `iiifUrl` view helper to build `/iiif/{2|3}/{identifier}/manifest` when the item has a CleanUrl identifier.
+	- If the helper returns a numeric-ID URL, rebuild the identifier segment using the CleanUrl property and normalize colons in the URL-encoded form.
+	- Always output an absolute URL (scheme + host) to feed client JS reliably; fall back to absolute numeric-ID manifest when identifiers are unavailable/disabled.
+- Behavior is unchanged on sites without CleanUrl identifiers; existing numeric-ID IIIF URLs continue to work.
+
+日本語サマリ:
+- テンプレート（エクスポート／ダウンロード）: IiifServer のヘルパーで IIIF マニフェスト URL を生成し、CleanUrl の識別子を優先して使用します。
+	- `iiifUrl` ビューヘルパーで `/iiif/{2|3}/{identifier}/manifest` を構築（識別子がある場合）。
+	- ヘルパーが数値IDのURLを返した際は、CleanUrl のプロパティから識別子を再構築し、URLエンコード内のコロンを正規化します。
+	- クライアントJSのため常に絶対URLを出力。識別子が無い／無効な場合は数値IDの絶対URLにフォールバックします。
+- CleanUrl を使っていないサイトでは挙動は従来どおり（数値IDの IIIF URL）。
+
 ## 0.3.8 (2025-10-24)
 
 - Server (i18n): Ensure site-level locale takes precedence for server JSON messages even when requests hit non-site routes.

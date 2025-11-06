@@ -76,7 +76,44 @@ $manifestUrl = '';
 try {
   $ver = (string) $this->setting('iiifserver_manifest_default_version', '3');
   $ver = in_array($ver, ['2','3'], true) ? $ver : '3';
-  $manifestUrl = rtrim($this->serverUrl('/'), '/') . '/iiif/' . $ver . '/' . (int) $item->id() . '/manifest';
+
+  // Prefer IiifServer helper (CleanUrl-aware). The helper returns an absolute URL for items.
+  $iiifUrl = null;
+  try { $iiifUrl = $this->plugin('iiifUrl'); } catch (\Throwable $e) { $iiifUrl = null; }
+  if ($iiifUrl) {
+    $manifestUrl = $iiifUrl($item, '', $ver);
+    // If the helper returned an absolute URL with a numeric segment, try to rebuild with CleanUrl identifier.
+    if ($manifestUrl && preg_match('~^https?://[^\s]+/iiif/(2|3)/(?P<id>[^/]+)/manifest$~', $manifestUrl, $m)) {
+      $verMatched = $m[1];
+      $idPart = $m['id'];
+      // If idPart looks purely numeric, try CleanUrl identifiers.
+      if ($idPart !== '' && ctype_digit($idPart)) {
+        try {
+          $getIds = $this->plugin('getIdentifiersFromResources');
+          if ($getIds) {
+            $ids = $getIds([$item]);
+            $identifier = is_array($ids) && $ids ? (string) current($ids) : '';
+            if ($identifier !== '') {
+              $encoded = rawurlencode($identifier);
+              // Keep colon unescaped for IIIF identifier convention
+              $encoded = str_replace('%3A', ':', $encoded);
+              $verEffective = in_array($verMatched, ['2','3'], true) ? $verMatched : $ver;
+              // Replace trailing "/{id}/manifest" with identifier, preserving base and version
+              $manifestUrl = preg_replace('~(/iiif/(2|3))/[^/]+/manifest$~', '$1/' . $encoded . '/manifest', $manifestUrl);
+              // Also ensure version matches effective one (in case helper default differs)
+              $manifestUrl = preg_replace('~/iiif/(2|3)/~', '/iiif/' . $verEffective . '/', $manifestUrl, 1);
+            }
+          }
+        } catch (\Throwable $e) { /* noop, fallback below */ }
+      }
+    }
+  }
+
+  // Fallback: build absolute URL with internal ID if helper not available or identifier missing
+  if (!$manifestUrl) {
+    $verFallback = in_array($ver, ['2','3'], true) ? $ver : '3';
+    $manifestUrl = rtrim($this->serverUrl('/'), '/') . '/iiif/' . $verFallback . '/' . (int) $item->id() . '/manifest';
+  }
 } catch (\Throwable $e) { $manifestUrl = ''; }
 ?>
 <?php
