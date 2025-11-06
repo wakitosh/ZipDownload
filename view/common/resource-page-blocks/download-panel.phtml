@@ -137,7 +137,15 @@ try {
   data-item-id="<?php echo (int) $itemId; ?>"
   data-item-title="<?php echo $escape($item->displayTitle(null, $valueLang)); ?>"
   data-locale="<?php echo $escape($lang); ?>"
-  data-manifest-url="<?php echo $manifestUrl ? $escape($manifestUrl) : ''; ?>"
+  <?php
+    // Expose a server-relative manifest URL to the client to avoid leaking absolute host/IP.
+    $manifestHref = $manifestUrl;
+    if ($manifestHref && preg_match('~^https?://~i', $manifestHref)) {
+      $p = parse_url($manifestHref, PHP_URL_PATH);
+      if ($p) { $manifestHref = $p; }
+    }
+  ?>
+  data-manifest-url="<?php echo $manifestHref ? $escape($manifestHref) : ''; ?>"
   data-zip-endpoint="<?php echo $escape($endpoint); ?>"
   data-zip-endpoint-site="<?php echo $escape($endpoint); ?>"
   data-zip-endpoint-global="<?php try { $u = $this->url('zip-download', ['id' => (int) $itemId]); echo $u ?: ''; } catch (\Throwable $e) { echo ''; } ?>">

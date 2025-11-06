@@ -89,8 +89,16 @@ if ($iconJsonld === '') { $iconJsonld = 'https://json-ld.org/images/json-ld-logo
   <h3><?php echo $escape($exportTitle); ?></h3>
   <ul>
     <?php if ($manifestUrl): ?>
+      <?php
+        // Prefer server-relative path for UI to avoid leaking absolute host/IP across envs.
+        $manifestHref = $manifestUrl;
+        if (preg_match('~^https?://~i', $manifestHref)) {
+          $pathOnly = parse_url($manifestHref, PHP_URL_PATH);
+          if ($pathOnly) { $manifestHref = $pathOnly; }
+        }
+      ?>
       <li>
-        <a href="<?php echo $escape($manifestUrl); ?>" target="_blank" rel="noopener">
+        <a href="<?php echo $escape($manifestHref); ?>" target="_blank" rel="noopener">
           <?php if ($iconIiif): ?><img src="<?php echo $escape($iconIiif); ?>" alt="IIIF" width="24" height="24" /><?php endif; ?>
           <span>IIIF Manifest</span>
         </a>
