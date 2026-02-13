@@ -219,94 +219,104 @@ $toVal = $toTs > 0 ? date('Y-m-d', $toTs) : '';
     radios.forEach(function(r){ r.addEventListener('change', toggle); });
     toggle();
   })();
-  </script>
+  function initAjaxPager() {
+    var container = document.getElementById('zipdownload-logs');
+    if (!container) {
+      return;
+    }
+
+    var busy = false;
+    var loadPartial = function(url, fullUrl) {
+      if (!url || busy) {
+        return;
+      }
+      busy = true;
+      fetch(url, {
+        headers: {
+          'X-Requested-With': 'XMLHttpRequest'
+        },
+        credentials: 'same-origin'
+      })
+        .then(function(resp) {
+          if (!resp.ok) {
+            throw new Error('Failed to load logs');
+          }
+          return resp.text();
+        })
+        .then(function(html) {
+          container.innerHTML = html;
+          if (fullUrl) {
+            window.history.replaceState({}, '', fullUrl);
+          }
+        })
+        .catch(function() {
+          if (fullUrl) {
+            window.location.href = fullUrl;
+          }
+        })
+        .finally(function() {
+          busy = false;
+        });
+    };
+
+    container.addEventListener('click', function(e) {
+      var link = e.target.closest('a.js-zipd-page');
+      if (!link || link.classList.contains('disabled') || link.getAttribute('aria-disabled') === 'true') {
+        return;
+      }
+      var ajaxUrl = link.getAttribute('data-ajax-url');
+      var fullUrl = link.getAttribute('href');
+      if (!ajaxUrl) {
+        return;
+      }
+      e.preventDefault();
+      loadPartial(ajaxUrl, fullUrl);
+    });
+
+    container.addEventListener('change', function(e) {
+      var select = e.target.closest('select.js-zipd-per-page');
+      if (!select) {
+        return;
+      }
+      var option = select.options[select.selectedIndex];
+      var ajaxUrl = option ? option.getAttribute('data-url') : '';
+      var fullUrl = option ? option.getAttribute('data-full-url') : '';
+      if (!ajaxUrl) {
+        return;
+      }
+      loadPartial(ajaxUrl, fullUrl);
+    });
+
+    container.addEventListener('submit', function(e) {
+      var form = e.target.closest('form.js-zipd-jump-form');
+      if (!form) {
+        return;
+      }
+      e.preventDefault();
+
+      var formData = new FormData(form);
+      var params = new URLSearchParams(formData);
+      var fullUrl = form.action + '?' + params.toString();
+      params.set('ajax', '1');
+      var ajaxUrl = form.action + '?' + params.toString();
+      loadPartial(ajaxUrl, fullUrl);
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initAjaxPager);
+  }
+  else {
+    initAjaxPager();
+  }
+</script>
+
 <div id="zipdownload-logs">
-  <table class="tablesaw tablesaw-stack" data-tablesaw-mode="stack">
-    <thead>
-      <tr>
-        <th><?= $translate('ID') ?></th>
-        <th><?= $translate('Started') ?></th>
-        <th><?= $translate('Finished') ?></th>
-        <th><?= $translate('Status') ?></th>
-        <th><?= $translate('Item') ?></th>
-        <th><?= $translate('Media Count') ?></th>
-        <th><?= $translate('Bytes Sent / Total') ?></th>
-        <th><?= $translate('IP') ?></th>
-        <th><?= $translate('User') ?></th>
-      </tr>
-    </thead>
-    <tbody>
-      <?php if (!empty($rows)): ?>
-        <?php foreach ($rows as $r): ?>
-          <tr>
-            <td><?= (int) $r['id'] ?></td>
-            <td><?= $this->escapeHtml($fmt($r['started_at'] ?? 0)) ?></td>
-            <td><?= !empty($r['finished_at']) ? $this->escapeHtml($fmt($r['finished_at'])) : '-' ?></td>
-            <td><?= $this->escapeHtml($r['status']) ?></td>
-            <td>
-              <?php
-              $itemId = (int) ($r['item_id'] ?? 0);
-              $itemTitle = trim((string) ($r['item_title'] ?? ''));
-              // Truncate overly long item titles for display, keep full text in title attribute.
-              $maxLen = 60;
-              if (function_exists('mb_strimwidth')) {
-                $shortTitle = mb_strimwidth($itemTitle, 0, $maxLen, '...', 'UTF-8');
-              } else {
-                $shortTitle = (strlen($itemTitle) > $maxLen) ? (substr($itemTitle, 0, $maxLen - 3) . '...') : $itemTitle;
-              }
-              $labelShort = '#' . $itemId . ($itemTitle !== '' ? ' ' . $this->escapeHtml($shortTitle) : '');
-              $labelFull = '#' . $itemId . ($itemTitle !== '' ? ' ' . $itemTitle : '');
-              $siteSlug = isset($r['site_slug']) ? trim((string) $r['site_slug']) : '';
-              $itemUrl = '';
-              if ($itemId > 0) {
-                if ($siteSlug !== '') {
-                  try {
-                    $itemUrl = $this->url('site/resource-id', ['site-slug' => $siteSlug, 'controller' => 'item', 'id' => $itemId]);
-                  }
-                  catch (\Throwable $e) {
-                    $itemUrl = '/s/' . rawurlencode($siteSlug) . '/item/' . $itemId;
-                  }
-                }
-                else {
-                  try {
-                    $itemUrl = $this->url('admin/id', ['controller' => 'item', 'id' => $itemId]);
-                  }
-                  catch (\Throwable $e) {
-                    $itemUrl = '/admin/item/' . $itemId;
-                  }
-                }
-              }
-              ?>
-              <?php if ($itemUrl): ?>
-                <a href="<?= $this->escapeHtml($itemUrl) ?>" target="_blank" rel="noopener" title="<?= $this->escapeHtmlAttr($labelFull) ?>"><?= $labelShort ?></a>
-              <?php else: ?>
-                <span title="<?= $this->escapeHtmlAttr($labelFull) ?>"><?= $labelShort ?></span>
-              <?php endif; ?>
-            </td>
-            <td><?= (int) ($r['media_count'] ?? 0) ?></td>
-            <td><?= number_format((int) ($r['bytes_sent'] ?? 0)) ?> / <?= number_format((int) ($r['bytes_total'] ?? 0)) ?></td>
-            <td><?= $this->escapeHtml($r['client_ip'] ?? '') ?></td>
-            <td><?= $this->escapeHtml($r['user_email'] ?? '') ?> (<?= (int) ($r['user_id'] ?? 0) ?>)</td>
-          </tr>
-        <?php endforeach; ?>
-      <?php else: ?>
-        <tr>
-          <td colspan="9"><?= $translate('No logs yet.') ?></td>
-        </tr>
-      <?php endif; ?>
-    </tbody>
-  </table>
-  <div class="pagination">
-    <?php if ($pages > 1): ?>
-      <ul class="pagination-list">
-        <?php for ($i = 1; $i <= $pages; $i++): ?>
-          <?php $q = array_merge($filters, ['page' => $i, 'per_page' => $perPage]); ?>
-          <?php $url = $this->url('admin/zip-download-logs', [], ['query' => $q]); ?>
-          <li class="<?= $i === $page ? 'active' : '' ?>">
-            <a href="<?= $this->escapeHtml($url) ?>"><?= $i ?></a>
-          </li>
-        <?php endfor; ?>
-      </ul>
-    <?php endif; ?>
-  </div>
+  <?= $this->partial('zip-download/logs/partial/list', [
+    'rows' => $rows,
+    'page' => $page,
+    'perPage' => $perPage,
+    'total' => $total,
+    'filters' => $filters,
+  ]) ?>
 </div>

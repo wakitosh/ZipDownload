@@ -62,7 +62,16 @@ class LogsController extends AbstractActionController {
       'filters' => $filters,
       'confirmForm' => $confirmForm,
     ]);
-    $vm->setTemplate('zip-download/logs/index');
+    $request = $this->getRequest();
+    $isAjax = (int) $this->params()->fromQuery('ajax', 0) === 1
+      || (method_exists($request, 'isXmlHttpRequest') && $request->isXmlHttpRequest());
+    if ($isAjax) {
+      $vm->setTemplate('zip-download/logs/partial/list');
+      $vm->setTerminal(TRUE);
+    }
+    else {
+      $vm->setTemplate('zip-download/logs/index');
+    }
     return $vm;
   }
 

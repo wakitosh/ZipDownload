@@ -1,0 +1,182 @@
+<?php
+/** @var array $rows */
+/** @var int $page */
+/** @var int $perPage */
+/** @var int $total */
+/** @var array $filters */
+
+$translate = $this->plugin('translate');
+$escape = $this->plugin('escapeHtml');
+$escapeAttr = $this->plugin('escapeHtmlAttr');
+
+$page = max(1, (int) ($page ?? 1));
+$perPage = max(10, min(100, (int) ($perPage ?? 25)));
+$total = max(0, (int) ($total ?? 0));
+$pages = (int) max(1, ceil($total / max(1, $perPage)));
+$filters = isset($filters) && is_array($filters) ? $filters : [];
+
+$tz = (string) ($this->setting('time_zone', 'UTC'));
+$fmt = function ($ts) use ($tz) {
+  $ts = (int) $ts;
+  if ($ts <= 0) {
+    return '-';
+  }
+  try {
+    $dt = new \DateTime('@' . $ts);
+    $dt->setTimezone(new \DateTimeZone($tz));
+    return $dt->format('Y-m-d H:i:s');
+  }
+  catch (\Throwable $e) {
+    return date('Y-m-d H:i:s', $ts);
+  }
+};
+
+$buildUrl = function (array $overrides = [], bool $ajax = FALSE) use ($filters, $page, $perPage) {
+  $query = array_merge($filters, [
+    'page' => $page,
+    'per_page' => $perPage,
+  ], $overrides);
+  if ($ajax) {
+    $query['ajax'] = 1;
+  }
+  return $this->url('admin/zip-download-logs', [], ['query' => $query]);
+};
+
+$firstPage = 1;
+$prevPage = max(1, $page - 1);
+$nextPage = min($pages, $page + 1);
+$lastPage = $pages;
+$choices = [10, 25, 50, 100];
+if (!in_array($perPage, $choices, TRUE)) {
+  $choices[] = $perPage;
+  sort($choices);
+}
+?>
+
+<table class="tablesaw tablesaw-stack" data-tablesaw-mode="stack">
+  <thead>
+    <tr>
+      <th><?= $escape($translate('ID')) ?></th>
+      <th><?= $escape($translate('Started')) ?></th>
+      <th><?= $escape($translate('Finished')) ?></th>
+      <th><?= $escape($translate('Status')) ?></th>
+      <th><?= $escape($translate('Item')) ?></th>
+      <th><?= $escape($translate('Media Count')) ?></th>
+      <th><?= $escape($translate('Bytes Sent / Total')) ?></th>
+      <th><?= $escape($translate('IP')) ?></th>
+      <th><?= $escape($translate('User')) ?></th>
+    </tr>
+  </thead>
+  <tbody>
+    <?php if (!empty($rows)): ?>
+      <?php foreach ($rows as $r): ?>
+        <tr>
+          <td><?= (int) $r['id'] ?></td>
+          <td><?= $escape($fmt($r['started_at'] ?? 0)) ?></td>
+          <td><?= !empty($r['finished_at']) ? $escape($fmt($r['finished_at'])) : '-' ?></td>
+          <td><?= $escape($r['status'] ?? '') ?></td>
+          <td>
+            <?php
+            $itemId = (int) ($r['item_id'] ?? 0);
+            $itemTitle = trim((string) ($r['item_title'] ?? ''));
+            $maxLen = 60;
+            if (function_exists('mb_strimwidth')) {
+              $shortTitle = mb_strimwidth($itemTitle, 0, $maxLen, '...', 'UTF-8');
+            }
+            else {
+              $shortTitle = (strlen($itemTitle) > $maxLen) ? (substr($itemTitle, 0, $maxLen - 3) . '...') : $itemTitle;
+            }
+            $labelShort = '#' . $itemId . ($itemTitle !== '' ? ' ' . $escape($shortTitle) : '');
+            $labelFull = '#' . $itemId . ($itemTitle !== '' ? ' ' . $itemTitle : '');
+            $siteSlug = isset($r['site_slug']) ? trim((string) $r['site_slug']) : '';
+            $itemUrl = '';
+            if ($itemId > 0) {
+              if ($siteSlug !== '') {
+                try {
+                  $itemUrl = $this->url('site/resource-id', ['site-slug' => $siteSlug, 'controller' => 'item', 'id' => $itemId]);
+                }
+                catch (\Throwable $e) {
+                  $itemUrl = '/s/' . rawurlencode($siteSlug) . '/item/' . $itemId;
+                }
+              }
+              else {
+                try {
+                  $itemUrl = $this->url('admin/id', ['controller' => 'item', 'id' => $itemId]);
+                }
+                catch (\Throwable $e) {
+                  $itemUrl = '/admin/item/' . $itemId;
+                }
+              }
+            }
+            ?>
+            <?php if ($itemUrl): ?>
+              <a href="<?= $escapeAttr($itemUrl) ?>" target="_blank" rel="noopener" title="<?= $escapeAttr($labelFull) ?>"><?= $labelShort ?></a>
+            <?php else: ?>
+              <span title="<?= $escapeAttr($labelFull) ?>"><?= $labelShort ?></span>
+            <?php endif; ?>
+          </td>
+          <td><?= (int) ($r['media_count'] ?? 0) ?></td>
+          <td><?= number_format((int) ($r['bytes_sent'] ?? 0)) ?> / <?= number_format((int) ($r['bytes_total'] ?? 0)) ?></td>
+          <td><?= $escape($r['client_ip'] ?? '') ?></td>
+          <td><?= $escape($r['user_email'] ?? '') ?> (<?= (int) ($r['user_id'] ?? 0) ?>)</td>
+        </tr>
+      <?php endforeach; ?>
+    <?php else: ?>
+      <tr>
+        <td colspan="9"><?= $escape($translate('No logs yet.')) ?></td>
+      </tr>
+    <?php endif; ?>
+  </tbody>
+</table>
+
+<div class="pagination" style="display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; margin-top: .75rem;">
+  <?php
+  $disableFirst = $page <= 1;
+  $disableLast = $page >= $pages;
+  ?>
+  <a class="button js-zipd-page <?= $disableFirst ? 'disabled' : '' ?>" href="<?= $escapeAttr($buildUrl(['page' => $firstPage], FALSE)) ?>" data-ajax-url="<?= $escapeAttr($buildUrl(['page' => $firstPage], TRUE)) ?>" <?= $disableFirst ? 'aria-disabled="true"' : '' ?>><?= $escape($translate('First')) ?></a>
+  <a class="button js-zipd-page <?= $disableFirst ? 'disabled' : '' ?>" href="<?= $escapeAttr($buildUrl(['page' => $prevPage], FALSE)) ?>" data-ajax-url="<?= $escapeAttr($buildUrl(['page' => $prevPage], TRUE)) ?>" <?= $disableFirst ? 'aria-disabled="true"' : '' ?>><?= $escape($translate('Previous')) ?></a>
+  <span><?= $escape(sprintf($translate('Page %d / %d'), $page, $pages)) ?></span>
+  <a class="button js-zipd-page <?= $disableLast ? 'disabled' : '' ?>" href="<?= $escapeAttr($buildUrl(['page' => $nextPage], FALSE)) ?>" data-ajax-url="<?= $escapeAttr($buildUrl(['page' => $nextPage], TRUE)) ?>" <?= $disableLast ? 'aria-disabled="true"' : '' ?>><?= $escape($translate('Next')) ?></a>
+  <a class="button js-zipd-page <?= $disableLast ? 'disabled' : '' ?>" href="<?= $escapeAttr($buildUrl(['page' => $lastPage], FALSE)) ?>" data-ajax-url="<?= $escapeAttr($buildUrl(['page' => $lastPage], TRUE)) ?>" <?= $disableLast ? 'aria-disabled="true"' : '' ?>><?= $escape($translate('Last')) ?></a>
+
+  <label for="zipd-per-page" style="margin-left:.5rem;"><?= $escape($translate('Rows per page')) ?></label>
+  <select id="zipd-per-page" class="js-zipd-per-page">
+    <?php foreach ($choices as $n): ?>
+      <?php
+      $fullUrl = $buildUrl(['page' => 1, 'per_page' => (int) $n], FALSE);
+      $ajaxUrl = $buildUrl(['page' => 1, 'per_page' => (int) $n], TRUE);
+      ?>
+      <option
+        value="<?= (int) $n ?>"
+        data-url="<?= $escapeAttr($ajaxUrl) ?>"
+        data-full-url="<?= $escapeAttr($fullUrl) ?>"
+        <?= ((int) $n === $perPage) ? 'selected' : '' ?>
+      ><?= (int) $n ?></option>
+    <?php endforeach; ?>
+  </select>
+
+  <form method="get" action="<?= $escapeAttr($this->url('admin/zip-download-logs')) ?>" class="js-zipd-jump-form" style="display:flex; align-items:center; gap:.35rem; margin:0 0 0 .5rem;">
+    <label for="zipd-page-jump"><?= $escape($translate('Jump to page')) ?></label>
+    <input
+      id="zipd-page-jump"
+      type="number"
+      name="page"
+      min="1"
+      max="<?= (int) $pages ?>"
+      value="<?= (int) $page ?>"
+      style="width: 76px;"
+    >
+    <input type="hidden" name="per_page" value="<?= (int) $perPage ?>">
+    <?php foreach ($filters as $filterKey => $filterValue): ?>
+      <?php
+      $filterKey = (string) $filterKey;
+      if ($filterKey === 'page' || $filterKey === 'per_page' || $filterKey === 'ajax') {
+        continue;
+      }
+      ?>
+      <input type="hidden" name="<?= $escapeAttr($filterKey) ?>" value="<?= $escapeAttr((string) $filterValue) ?>">
+    <?php endforeach; ?>
+    <button type="submit" class="button"><?= $escape($translate('Go')) ?></button>
+  </form>
+</div>

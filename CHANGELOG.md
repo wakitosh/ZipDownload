@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.10 (2026-02-13)
+
+- Admin Logs UI: Switched pagination to navigation buttons (First / Previous / Next / Last) with Ajax partial updates.
+- Admin Logs UI: Added direct page-jump form (page number + Go), handled via Ajax.
+- Admin Logs UI: Added rows-per-page selector (10/25/50/100) with Ajax refresh while preserving active filters.
+
+日本語サマリ:
+- 管理ログ画面: ページャーをナビゲーションボタン方式（先頭／前へ／次へ／最後）に変更し、Ajax で部分更新するようにしました。
+- 管理ログ画面: 指定ページへ直接移動できるページジャンプフォーム（ページ番号 + Go）を追加しました（Ajax対応）。
+- 管理ログ画面: 1ページあたりの行数（10/25/50/100）を変更可能にし、現在のフィルタを維持したまま Ajax 再描画します。
+
 ## 0.3.9 (2025-11-06)
 
 - Templates (export / download): Generate IIIF Manifest URLs via IiifServer helper and prefer CleanUrl identifiers when enabled.
