@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.11 (2026-07-24)
+
+- Server: Make the ZIP streaming endpoint (`/zip-download/item/:id`) POST-only before any database or log work is performed. Crawlers had discovered the endpoint URL embedded in item-page data attributes and requested it without `media_ids`, producing many noisy “No media selected” failed log rows. Normal UI downloads already use POST and are unchanged.
+- Server i18n: Add a localized JSON message for “Method not allowed”.
+
+日本語サマリ:
+- サーバー: ZIP配信エンドポイント（`/zip-download/item/:id`）を、DB処理やログ記録の前に POST のみに限定しました。クローラーがアイテムページ内の data 属性にあるエンドポイントURLを発見し、`media_ids` なしでアクセスしていたため、“No media selected” の失敗ログが大量に発生していました。通常UIのダウンロードは従来どおりPOSTを使うため挙動は変わりません。
+- サーバー i18n: “Method not allowed” の日本語メッセージを追加しました。
+
 ## 0.3.10 (2026-02-13)
 
 - Admin Logs UI: Switched pagination to navigation buttons (First / Previous / Next / Last) with Ajax partial updates.

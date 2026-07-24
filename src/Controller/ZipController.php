@@ -205,6 +205,15 @@ class ZipController extends AbstractActionController {
    * Stream a ZIP for an item with the given media ids (POST media_ids).
    */
   public function itemAction() {
+    // This endpoint starts a ZIP stream and writes progress/log state, so it is
+    // intentionally POST-only. Crawlers can discover the endpoint URL embedded
+    // in page data attributes and may request it without media_ids; rejecting
+    // non-POST requests before any DB/log work keeps admin logs meaningful.
+    $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? ''));
+    if ($method !== 'POST') {
+      header('Allow: POST', TRUE, 405);
+      return $this->jsonError(405, 'Method not allowed');
+    }
     // Ensure DB connection and logs table before any logging.
     $this->ensureDbAndLogsTable();
     $id = (int) $this->params()->fromRoute('id');
@@ -1350,6 +1359,7 @@ SQL;
     }
     static $map = [
       'No media selected' => 'メディアが選択されていません',
+      'Method not allowed' => '許可されていないメソッドです',
       'No accessible media' => 'アクセス可能なメディアがありません',
       'Requested download too large' => '要求されたダウンロードのサイズが大きすぎます',
       'Too many files requested' => '要求されたファイル数が多すぎます',
