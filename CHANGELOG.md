@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.13 (2026-08-03)
+
+- Server: Estimate the size of IIIF-served media from pixel area instead of a flat 2 MB per file. The old guess was used whenever a per-file size was unavailable, which is the normal case for media served through an image server, and it was badly wrong for scanned material: an 880 page item was estimated at 1.76 GB against about 6.5 GB actually produced. Measured against production material the new estimate is within about 4%.
+- Server: Calibrate bytes-per-pixel by fetching two real derivatives, for selections of three files or more. The size cannot simply be asked for — Cantaloupe generates derivatives on demand and streams them chunked, so it answers HEAD without a `Content-Length` and ignores `Range` — so a sample is the only way to measure. This brings the estimate to within about 1% on uniform material.
+- Server: Report `files_done` / `files_total` in the progress status, so the client can project the final archive size from the work completed so far and keep the remaining time meaningful even when the up-front estimate is wrong.
+- Server: Stop clamping `bytes_sent` just below `total_bytes`. The clamp froze reported progress whenever the estimate was too low, and it hid the very numbers needed to correct that estimate.
+- Server: Share IIIF service-id resolution between the ZIP builder and the size estimator, so both resolve the same images. The estimator previously built its probe URL without stripping any `info.json` suffix, so every probe failed and every file fell back to the flat guess.
+- Client: Project the total archive size from the server's per-file progress, and prefer it over the up-front estimate. A remaining time is now shown throughout the transfer instead of an open-ended "finishing up" that could last for gigabytes.
+- Client: When no size projection is available yet, report file counts (`620/880 files`) rather than an indefinite message.
+
+- Config: Raise the default `max_bytes_per_download` from 3 GB to 8 GB, and `max_total_active_bytes` from 6 GB to 8 GB. With the estimate corrected, items that genuinely exceed the limit are now refused up front where the understated estimate previously let them through — an 880 page volume of about 6.5 GB was passing a 3 GB limit. The total-active limit is raised to match, because a single global download slot means only one download is ever active and a lower total would make the per-download limit unreachable.
+
+Note: these are defaults for installations that have never saved the module configuration. An installation with a stored value keeps it; change it under Modules → ZipDownload → Configure (the field accepts `8G`).
+
+日本語サマリ:
+- サーバー: IIIF経由で配信されるメディアのサイズ見積を、1ファイルあたり2MB固定から**ピクセル面積ベース**に変更しました。従来の固定値はファイルごとのサイズが取得できない場合に使われており、画像サーバー経由のメディアでは常にこれに該当していたため、スキャン資料では大きく外れていました（880ページのアイテムで見積1.76GBに対し実際は約6.5GB）。本番データで検証したところ、新方式の誤差は約4%です。
+- サーバー: 3ファイル以上の選択時に、実際の派生画像を2枚取得してピクセルあたりのバイト数を較正します。Cantaloupeは派生画像をオンデマンド生成してchunkedで返すため、HEADに`Content-Length`を返さず`Range`も無視します。つまりサイズを問い合わせる手段がなく、実測するしかありません。これにより均質な資料では誤差約1%になります。
+- サーバー: 進捗ステータスに `files_done` / `files_total` を追加しました。クライアントが処理済みファイル数から最終的なZIPサイズを射影できるため、初期見積が外れていても残り時間が意味を持ち続けます。
+- サーバー: `bytes_sent` を `total_bytes` の直下で頭打ちにする処理を廃止しました。この頭打ちは見積が小さすぎる場合に進捗表示を凍結させ、さらに見積を補正するために必要な数値そのものを隠していました。
+- サーバー: IIIFサービスIDの解決処理をZIP生成側と見積側で共通化し、双方が同じ画像を参照するようにしました。見積側は従来 `info.json` 接尾辞を除去せずにURLを組み立てていたため、全ての問い合わせが失敗し、全ファイルが固定値にフォールバックしていました。
+- クライアント: サーバーのファイル単位の進捗から全体サイズを射影し、初期見積より優先して使用します。転送中は常に残り時間が表示されるようになり、数GBにわたって「まもなく完了」が続く状態は解消されます。
+- クライアント: 射影がまだ得られない段階では、不定な文言ではなくファイル数（`620/880 ファイル`）を表示します。
+- 設定: `max_bytes_per_download` の既定値を 3GB から **8GB** に、`max_total_active_bytes` を 6GB から **8GB** に引き上げました。見積が正確になったことで、実際に上限を超えるアイテムは事前に拒否されるようになります（従来は見積が過小だったため、約6.5GBの880ページ資料が3GB制限を通過していました）。同時実行スロットは全体で1つのため、同時アクティブ量の上限を低いままにすると1件あたりの上限に到達できなくなるので、こちらも同値に揃えています。
+
+注意: これらはモジュール設定を一度も保存していないインストールに適用される既定値です。既に値が保存されている場合はその値が維持されるため、管理画面の モジュール → ZipDownload → 設定 で変更してください（`8G` の形式で入力できます）。
+
 ## 0.3.12 (2026-08-02)
 
 - Client: Base the download-panel progress on the bytes the browser has actually received, read incrementally from the response stream, instead of the server-side `bytes_sent` counter. The server counter only tracks what PHP wrote to the output stream; with FastCGI/proxy buffering it reaches 100% while the browser is still receiving, so the ETA collapsed to a few seconds and the panel then appeared frozen for the rest of a multi-GB transfer. The reported time now covers ZIP building and transfer together.

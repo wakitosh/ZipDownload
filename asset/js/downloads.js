@@ -239,6 +239,8 @@
         let serverStatus = 'running';
         let serverSent = 0;
         let serverTotal = totalBytes;   // estimate until the server reports actual
+        let filesDone = 0;
+        let filesTotal = 0;
         let buildFinished = false;
         let receivedBytes = 0;
         let receiveStartedAt = 0;
@@ -247,11 +249,25 @@
         // a proxy in front puts it back: it is the only exact total available.
         const contentLength = Number(res.headers.get('content-length') || 0) || 0;
 
+        // Total projected from the work done so far: the server publishes how
+        // many of the selected files it has finished, so the bytes it has
+        // produced extrapolate to a total that self-corrects as the build runs.
+        // This matters because the up-front estimate can be far too low — when
+        // a per-file size is unavailable the server has to guess — and without
+        // a correction the ETA would run out long before the transfer does.
+        function projectedTotal() {
+            if (filesDone < 2 || filesTotal <= filesDone || serverSent <= 0) return 0;
+            return Math.round(serverSent * (filesTotal / filesDone));
+        }
+
         // Best known size of the ZIP being transferred, in preference order:
-        // exact Content-Length, actual bytes the build produced, client estimate.
+        // exact Content-Length, actual size once the build has finished,
+        // projection from work done, then the up-front estimate.
         function knownTotal() {
             if (contentLength > 0) return contentLength;
             if (buildFinished && serverTotal > 0) return serverTotal;
+            const projected = projectedTotal();
+            if (projected > 0) return Math.max(projected, receivedBytes);
             return totalBytes > 0 ? totalBytes : serverTotal;
         }
 
@@ -282,9 +298,15 @@
                 progress.textContent = t(panel,
                     `ダウンロード中: ${pct}% 残り約 ${eta}（${fmtBytes(receivedBytes)} / ${fmtBytes(total)}, ${speedText}）`,
                     `Downloading: ${pct}% about ${eta} left (${fmtBytes(receivedBytes)} / ${fmtBytes(total)}, ${speedText})`);
+            } else if (filesTotal > 0 && filesDone < filesTotal) {
+                // No usable size projection yet, but we know how many files are
+                // left. Report that rather than an open-ended "almost done".
+                progress.textContent = t(panel,
+                    `ダウンロード中: ${filesDone}/${filesTotal} ファイル（${fmtBytes(receivedBytes)}, ${speedText}）`,
+                    `Downloading: ${filesDone}/${filesTotal} files (${fmtBytes(receivedBytes)}, ${speedText})`);
             } else if (total > 0) {
                 // Received at least the expected size (ZIP framing adds a little
-                // over the estimate) — the transfer is on its last chunks.
+                // over the total) — the transfer is on its last chunks.
                 progress.textContent = t(panel,
                     `ダウンロード中: まもなく完了（${fmtBytes(receivedBytes)}, ${speedText}）`,
                     `Downloading: finishing up (${fmtBytes(receivedBytes)}, ${speedText})`);
@@ -308,6 +330,8 @@
                     serverSent = Number(s.bytes_sent || 0) || 0;
                     const reported = Number(s.total_bytes || 0) || 0;
                     if (reported > 0) serverTotal = reported;
+                    filesDone = Number(s.files_done || 0) || 0;
+                    filesTotal = Number(s.files_total || 0) || 0;
                     if (serverStatus === 'done') {
                         // total_bytes is now the real archive payload size, so
                         // the ETA below stops relying on the client estimate.

@@ -23,10 +23,29 @@ class ZipController extends AbstractActionController {
    * (MySQL and Cantaloupe are already allocated significant memory).
    */
   private const MAX_CONCURRENT_DOWNLOADS_GLOBAL = 1;
-  private const MAX_BYTES_PER_DOWNLOAD = 3221225472;
-  private const MAX_TOTAL_ACTIVE_BYTES = 6442450944;
+  // 8 GiB. Large digitized volumes legitimately reach this size: an 880 page
+  // item produces about 6.5 GB. The total-active limit matches the per-download
+  // one because a single global slot means only one download is ever active;
+  // a lower total would simply make the per-download limit unreachable.
+  private const MAX_BYTES_PER_DOWNLOAD = 8589934592;
+  private const MAX_TOTAL_ACTIVE_BYTES = 8589934592;
   private const MAX_FILES_PER_DOWNLOAD = 1000;
   private const PROGRESS_TOKEN_TTL = 7200;
+
+  /**
+   * Size estimation for media served through IIIF.
+   *
+   * Output size is estimated from pixel area, which is stored with the media
+   * and costs nothing to read. Two real derivatives are fetched to calibrate
+   * the bytes-per-pixel ratio, but only for selections large enough that the
+   * extra requests are negligible against the download itself. The default
+   * ratio matches JPEG output measured on production material.
+   */
+  private const ESTIMATE_BYTES_PER_PIXEL = 0.25;
+  private const ESTIMATE_SAMPLE_COUNT = 2;
+  private const ESTIMATE_SAMPLE_MIN_FILES = 3;
+  private const ESTIMATE_SAMPLE_TIMEOUT_SEC = 15;
+  private const ESTIMATE_SAMPLE_BUDGET_SEC = 20;
 
   /**
    * Slot lock handle and index for global concurrency control.
@@ -615,7 +634,14 @@ class ZipController extends AbstractActionController {
       return $try;
     };
 
-    foreach ($medias as $media) {
+    $mediaTotal = count($medias);
+    foreach ($medias as $mediaIndex => $media) {
+      // Publish how far through the selection we are, so the client can
+      // extrapolate a realistic total size from the bytes produced so far
+      // however wrong the up-front estimate turns out to be.
+      if ($progressToken) {
+        $this->setProgressFiles($progressToken, (int) $mediaIndex, $mediaTotal);
+      }
       try {
         // Check for client-requested cancel before each media.
         if ($progressToken) {
@@ -760,6 +786,10 @@ class ZipController extends AbstractActionController {
           $this->logWarning('Zip add failed: ' . $e->getMessage());
         }
       }
+    }
+
+    if ($progressToken) {
+      $this->setProgressFiles($progressToken, $mediaTotal, $mediaTotal);
     }
 
     $zip->finish();
@@ -945,53 +975,7 @@ class ZipController extends AbstractActionController {
       return [0, 0];
     }
 
-    // Look for a service id in a few common places (simple heuristic).
-    $serviceIds = [];
-    if (isset($iiif['sequences']) && is_array($iiif['sequences'])) {
-      foreach ($iiif['sequences'] as $seq) {
-        if (!isset($seq['canvases']) || !is_array($seq['canvases'])) {
-          continue;
-        }
-        foreach ($seq['canvases'] as $canvas) {
-          if (isset($canvas['images']) && is_array($canvas['images'])) {
-            foreach ($canvas['images'] as $img) {
-              $svc = $img['resource']['service'] ?? NULL;
-              $id = is_string($svc) ? $svc : ($svc['@id'] ?? ($svc['id'] ?? NULL));
-              if ($id) {
-                $serviceIds[] = (string) $id;
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // Simple IIIF v3 structure scan.
-    if (empty($serviceIds) && isset($iiif['items']) && is_array($iiif['items'])) {
-      foreach ($iiif['items'] as $canvas) {
-        if (isset($canvas['items']) && is_array($canvas['items'])) {
-          foreach ($canvas['items'] as $page) {
-            if (isset($page['items']) && is_array($page['items'])) {
-              foreach ($page['items'] as $anno) {
-                $svc = $anno['body']['service'] ?? NULL;
-                $id = is_string($svc) ? $svc : ($svc['@id'] ?? ($svc['id'] ?? NULL));
-                if ($id) {
-                  $serviceIds[] = (string) $id;
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-
-    if (empty($serviceIds)) {
-      // Last fallback: use media source if it looks like IIIF.
-      $src = (string) $media->getSource();
-      if ($src && (strpos($src, '/iiif/2/') !== FALSE || strpos($src, '/iiif/3/') !== FALSE)) {
-        $serviceIds[] = rtrim($src, '/');
-      }
-    }
+    $serviceIds = $this->extractIiifServiceIds($iiif, $media);
 
     $this->safeLog(
       'info',
@@ -1020,14 +1004,7 @@ class ZipController extends AbstractActionController {
         );
         continue;
       }
-      $base = rtrim($serviceId, '/');
-      // If the service id points to an info.json, strip that suffix.
-      if (preg_match('@/info\\.json$@', $base)) {
-        $base = preg_replace('@/info\\.json$@', '', $base);
-      }
-      elseif (strpos($base, '/info.json') !== FALSE) {
-        $base = preg_replace('@/info\\.json.*$@', '', $base);
-      }
+      $base = $this->iiifImageBase($serviceId);
       $this->safeLog(
         'info',
         'Zip: IIIF base computed',
@@ -1036,12 +1013,7 @@ class ZipController extends AbstractActionController {
           'base' => $base,
         ]
       );
-      $candidates = [
-        $base . '/full/max/0/default.jpg',
-        $base . '/full/full/0/default.jpg',
-        $base . '/max/full/0/default.jpg',
-        $base . '/full/max/0/default.png',
-      ];
+      $candidates = $this->iiifImageCandidates($base);
 
       $fetched = FALSE;
       $body = '';
@@ -1173,6 +1145,149 @@ class ZipController extends AbstractActionController {
   }
 
   /**
+   * Record how many media of the selection have been processed.
+   *
+   * Combined with bytes_sent this lets the client project the final archive
+   * size while the build is still running.
+   */
+  private function setProgressFiles(string $token, int $done, int $total): void {
+    if ($token === '') {
+      return;
+    }
+    try {
+      $meta = $this->readProgress($token);
+      if (!$meta) {
+        return;
+      }
+      $meta['files_done'] = max(0, $done);
+      if ($total > 0) {
+        $meta['files_total'] = $total;
+      }
+      $this->writeProgress($token, $meta);
+    }
+    catch (\Throwable $e) {
+      // Ignore progress update failures.
+    }
+  }
+
+  /**
+   * Collect IIIF image service ids advertised by a media.
+   *
+   * Shared by the ZIP builder and the size estimator so that both resolve the
+   * same images; an estimate taken from different URLs than the ones actually
+   * archived is worse than no estimate at all.
+   */
+  private function extractIiifServiceIds(array $iiif, Media $media): array {
+    $serviceIds = [];
+
+    // IIIF Presentation v2: sequences -> canvases -> images.
+    if (isset($iiif['sequences']) && is_array($iiif['sequences'])) {
+      foreach ($iiif['sequences'] as $seq) {
+        if (!isset($seq['canvases']) || !is_array($seq['canvases'])) {
+          continue;
+        }
+        foreach ($seq['canvases'] as $canvas) {
+          if (isset($canvas['images']) && is_array($canvas['images'])) {
+            foreach ($canvas['images'] as $img) {
+              $svc = $img['resource']['service'] ?? NULL;
+              $id = $this->iiifServiceId($svc);
+              if ($id) {
+                $serviceIds[] = $id;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // IIIF Presentation v3: items -> items -> items -> body.
+    if (empty($serviceIds) && isset($iiif['items']) && is_array($iiif['items'])) {
+      foreach ($iiif['items'] as $canvas) {
+        if (isset($canvas['items']) && is_array($canvas['items'])) {
+          foreach ($canvas['items'] as $page) {
+            if (isset($page['items']) && is_array($page['items'])) {
+              foreach ($page['items'] as $anno) {
+                $svc = $anno['body']['service'] ?? NULL;
+                $id = $this->iiifServiceId($svc);
+                if ($id) {
+                  $serviceIds[] = $id;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // An Image API info.json stored directly as the media data.
+    if (empty($serviceIds) && isset($iiif['@id']) && is_string($iiif['@id'])) {
+      $serviceIds[] = (string) $iiif['@id'];
+    }
+    if (empty($serviceIds) && isset($iiif['id']) && is_string($iiif['id'])) {
+      $serviceIds[] = (string) $iiif['id'];
+    }
+
+    if (empty($serviceIds)) {
+      // Last fallback: use media source if it looks like IIIF.
+      $src = (string) $media->getSource();
+      if ($src && (strpos($src, '/iiif/2/') !== FALSE || strpos($src, '/iiif/3/') !== FALSE)) {
+        $serviceIds[] = rtrim($src, '/');
+      }
+    }
+
+    return $serviceIds;
+  }
+
+  /**
+   * Normalize a IIIF service value (string, object or list) to its id.
+   */
+  private function iiifServiceId($svc): string {
+    if (is_string($svc)) {
+      return $svc;
+    }
+    if (is_array($svc)) {
+      // A service list: take the first entry that carries an id.
+      if (isset($svc[0]) && is_array($svc[0])) {
+        $svc = $svc[0];
+      }
+      $id = $svc['@id'] ?? ($svc['id'] ?? NULL);
+      if (is_string($id)) {
+        return $id;
+      }
+    }
+    return '';
+  }
+
+  /**
+   * Strip any info.json suffix so the value can be used as an Image API base.
+   */
+  private function iiifImageBase(string $serviceId): string {
+    $base = rtrim($serviceId, '/');
+    if (preg_match('@/info\\.json$@', $base)) {
+      $base = preg_replace('@/info\\.json$@', '', $base);
+    }
+    elseif (strpos($base, '/info.json') !== FALSE) {
+      $base = preg_replace('@/info\\.json.*$@', '', $base);
+    }
+    return $base;
+  }
+
+  /**
+   * Image API URLs to try, in order, for a normalized base.
+   */
+  private function iiifImageCandidates(string $base): array {
+    if ($base === '') {
+      return [];
+    }
+    return [
+      $base . '/full/max/0/default.jpg',
+      $base . '/full/full/0/default.jpg',
+      $base . '/max/full/0/default.jpg',
+      $base . '/full/max/0/default.png',
+    ];
+  }
+
+  /**
    * Read progress data for a token from a temp file.
    */
   private function readProgress(string $token): array {
@@ -1300,14 +1415,12 @@ SQL;
       if ($total <= 0 && $totalBytesEstimate > 0) {
         $total = $totalBytesEstimate;
       }
-      $next = $sent + max(0, $deltaBytes);
-      if ($total > 0) {
-        // Leave a tiny guard (1%) to avoid hitting 100% too early; completion
-        // path will set bytes_sent=total.
-        $guard = max(1, (int) floor($total * 0.01));
-        $next = min($next, max(0, $total - $guard));
-      }
-      $meta['bytes_sent'] = $next;
+      // Report the true number of bytes produced, even when it overshoots the
+      // estimate. Clamping it just below total_bytes used to freeze progress
+      // whenever the estimate was too low, and it also destroys the client's
+      // ability to project a corrected total from bytes-per-file. The client
+      // caps the displayed percentage instead.
+      $meta['bytes_sent'] = $sent + max(0, $deltaBytes);
       if (!isset($meta['total_bytes']) || (int) $meta['total_bytes'] <= 0) {
         $meta['total_bytes'] = $total;
       }
@@ -1609,24 +1722,40 @@ SQL;
       $httpClient = NULL;
     }
 
+    // Pass 1: sizes we can determine locally, with no network access.
     $total = 0;
     $fileCount = 0;
+    // Media whose archived size is only knowable from the IIIF image server.
+    $unknown = [];
     foreach ($mediaIds as $mid) {
       $m = $repo->find($mid);
       if (!$m) {
         continue;
       }
       $fileCount++;
-      // Prefer stored size if available in metadata.
-      $size = 0;
+
+      // The ZIP builder prefers IIIF derivatives over the stored original, so
+      // a locally known size is only valid when the media has no IIIF service.
+      $serviceIds = [];
+      $data = NULL;
       try {
         $data = $m->getData();
-        if (is_array($data) && isset($data['file_size'])) {
-          $size = (int) $data['file_size'];
+        if (is_array($data) && $data) {
+          $serviceIds = $this->extractIiifServiceIds($data, $m);
         }
       }
       catch (\Throwable $e) {
-        $size = 0;
+        $data = NULL;
+      }
+      if ($serviceIds) {
+        $unknown[] = ['media' => $m, 'services' => $serviceIds, 'data' => $data];
+        continue;
+      }
+
+      // Prefer stored size if available in metadata.
+      $size = 0;
+      if (is_array($data) && isset($data['file_size'])) {
+        $size = (int) $data['file_size'];
       }
 
       // If has original, try filesystem size.
@@ -1642,44 +1771,172 @@ SQL;
         }
       }
 
-      // If still unknown, try IIIF HEAD to get Content-Length when possible.
-      if ($size === 0) {
-        $src = (string) $m->getSource();
-        if ($src && $httpClient && (strpos($src, '/iiif/') !== FALSE || strpos($src, '/info.json') !== FALSE)) {
-          try {
-            $httpClient->reset();
-            $httpClient->setOptions(['timeout' => 5, 'maxredirects' => 2]);
-            // Attempt HEAD on a likely image resource.
-            $candidate = rtrim($src, '/') . '/full/max/0/default.jpg';
-            $resp = $httpClient->setUri($candidate)->setMethod('HEAD')->send();
-            if (method_exists($resp, 'isOk') && $resp->isOk()) {
-              $cl = NULL;
-              try {
-                $cl = $resp->getHeaders()->get('Content-Length');
-              }
-              catch (\Throwable $e) {
-                $cl = NULL;
-              }
-              if ($cl) {
-                $size = (int) $cl;
-              }
-            }
+      if ($size > 0) {
+        $total += $size;
+      }
+      else {
+        $unknown[] = ['media' => $m, 'services' => [], 'data' => $data];
+      }
+    }
+
+    // Pass 2: size the remaining media from their IIIF pixel dimensions.
+    //
+    // The previous flat 2 MB per file guess was far off for scanned material:
+    // an 880 page item was estimated at 1.76 GB and actually produces about
+    // 6.9 GB. JPEG output is close to proportional to pixel count for a given
+    // encoder setting, so area times bytes-per-pixel is a much better model,
+    // and it needs nothing but data already stored with the media. A couple of
+    // real derivatives are measured to calibrate the ratio when the selection
+    // is large enough for the extra requests to be worth it.
+    $basis = 'local';
+    if ($unknown) {
+      $areas = [];
+      foreach ($unknown as $entry) {
+        $areas[] = $this->iiifPixelArea($entry['data'], count($entry['services']));
+      }
+
+      $bytesPerPixel = self::ESTIMATE_BYTES_PER_PIXEL;
+      $basis = 'dimensions';
+      $sampleBytes = [];
+      if (count($unknown) >= self::ESTIMATE_SAMPLE_MIN_FILES) {
+        $sampledBytesTotal = 0;
+        $sampledAreaTotal = 0;
+        $deadline = microtime(TRUE) + self::ESTIMATE_SAMPLE_BUDGET_SEC;
+        foreach ($this->pickSampleIndexes(count($unknown), self::ESTIMATE_SAMPLE_COUNT) as $idx) {
+          if (microtime(TRUE) >= $deadline) {
+            break;
           }
-          catch (\Throwable $e) {
-            // Ignore network errors. Fallback to default below.
+          $bytes = $this->sampleIiifImageBytes($httpClient, $unknown[$idx]['services']);
+          if ($bytes <= 0) {
+            continue;
           }
+          $sampleBytes[] = $bytes;
+          if ($areas[$idx] > 0) {
+            $sampledBytesTotal += $bytes;
+            $sampledAreaTotal += $areas[$idx];
+          }
+        }
+        if ($sampledAreaTotal > 0) {
+          $bytesPerPixel = $sampledBytesTotal / $sampledAreaTotal;
+          $basis = 'calibrated';
         }
       }
 
-      // Fallback default estimate for unknown: 2MB per file.
-      if ($size <= 0) {
-        $size = 2000000;
+      // Media without usable dimensions fall back to the measured average, or
+      // to a flat guess when nothing could be measured at all.
+      $perFileFallback = $sampleBytes
+        ? (int) round(array_sum($sampleBytes) / count($sampleBytes))
+        : 2000000;
+      foreach ($areas as $area) {
+        $total += $area > 0 ? (int) round($area * $bytesPerPixel) : $perFileFallback;
       }
-      $total += $size;
     }
+
     header('Content-Type: application/json');
-    echo json_encode(['total_bytes' => $total, 'total_files' => $fileCount]);
+    echo json_encode([
+      'total_bytes' => $total,
+      'total_files' => $fileCount,
+      'estimate_basis' => $basis,
+    ]);
     exit;
+  }
+
+  /**
+   * Evenly spaced indexes to sample from a list of the given size.
+   */
+  private function pickSampleIndexes(int $count, int $wanted): array {
+    if ($count <= 0) {
+      return [];
+    }
+    $wanted = max(1, min($wanted, $count));
+    if ($wanted === $count) {
+      return range(0, $count - 1);
+    }
+    $indexes = [];
+    for ($i = 0; $i < $wanted; $i++) {
+      // Sample from the middle of each of $wanted equal slices so that a
+      // single unusual first or last page cannot skew the average.
+      $indexes[] = (int) floor(($i + 0.5) * $count / $wanted);
+    }
+    return array_values(array_unique($indexes));
+  }
+
+  /**
+   * Measure one real derivative, to calibrate bytes per pixel.
+   *
+   * The size cannot be asked for: Cantaloupe generates derivatives on demand
+   * and streams them chunked, so it answers HEAD without a Content-Length and
+   * ignores Range requests. Fetching the image is the only way to learn its
+   * size, which is why only a couple of files are ever sampled.
+   */
+  private function sampleIiifImageBytes($httpClient, array $serviceIds): int {
+    if (!$httpClient || !$serviceIds) {
+      return 0;
+    }
+    foreach ($serviceIds as $serviceId) {
+      foreach ($this->iiifImageCandidates($this->iiifImageBase((string) $serviceId)) as $url) {
+        try {
+          $httpClient->reset();
+          $httpClient->setOptions([
+            'timeout' => self::ESTIMATE_SAMPLE_TIMEOUT_SEC,
+            'maxredirects' => 2,
+          ]);
+          $httpClient->setHeaders([
+            'Accept' => 'image/jpeg,image/*;q=0.8,*/*;q=0.5',
+            'User-Agent' => 'Omeka-ZipDownload/1.0',
+          ]);
+          $resp = $httpClient->setUri($url)->setMethod('GET')->send();
+          if (method_exists($resp, 'isOk') && $resp->isOk()) {
+            $body = $resp->getBody();
+            $len = is_string($body) ? strlen($body) : 0;
+            if ($len > 0) {
+              return $len;
+            }
+          }
+        }
+        catch (\Throwable $e) {
+          // Try the next candidate URL.
+        }
+      }
+    }
+    return 0;
+  }
+
+  /**
+   * Total pixel area a media contributes, from its IIIF description.
+   */
+  private function iiifPixelArea($data, int $serviceCount): int {
+    if (!is_array($data)) {
+      return 0;
+    }
+
+    // An Image API info.json describes a single image.
+    $w = (int) ($data['width'] ?? 0);
+    $h = (int) ($data['height'] ?? 0);
+    if ($w > 0 && $h > 0) {
+      return $w * $h * max(1, $serviceCount);
+    }
+
+    // A Presentation manifest: sum every canvas it carries.
+    $area = 0;
+    $canvases = [];
+    if (isset($data['items']) && is_array($data['items'])) {
+      $canvases = $data['items'];
+    }
+    elseif (isset($data['sequences'][0]['canvases']) && is_array($data['sequences'][0]['canvases'])) {
+      $canvases = $data['sequences'][0]['canvases'];
+    }
+    foreach ($canvases as $canvas) {
+      if (!is_array($canvas)) {
+        continue;
+      }
+      $cw = (int) ($canvas['width'] ?? 0);
+      $ch = (int) ($canvas['height'] ?? 0);
+      if ($cw > 0 && $ch > 0) {
+        $area += $cw * $ch;
+      }
+    }
+    return $area;
   }
 
   /**

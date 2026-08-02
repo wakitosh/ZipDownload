@@ -215,8 +215,8 @@ class Module extends AbstractModule {
     // Populate defaults from settings or fall back to controller constants.
     $form->setData([
       'max_concurrent_downloads_global' => (int) ($settings->get('zipdownload.max_concurrent_downloads_global') ?? 1),
-      'max_bytes_per_download' => (string) ($settings->get('zipdownload.max_bytes_per_download') ?? 3221225472),
-      'max_total_active_bytes' => (string) ($settings->get('zipdownload.max_total_active_bytes') ?? 6442450944),
+      'max_bytes_per_download' => (string) ($settings->get('zipdownload.max_bytes_per_download') ?? 8589934592),
+      'max_total_active_bytes' => (string) ($settings->get('zipdownload.max_total_active_bytes') ?? 8589934592),
       'max_files_per_download' => (int) ($settings->get('zipdownload.max_files_per_download') ?? 1000),
       'progress_token_ttl' => (int) ($settings->get('zipdownload.progress_token_ttl') ?? 7200),
     // Removed: terms link settings moved to theme.
@@ -235,8 +235,8 @@ class Module extends AbstractModule {
     $post = $controller->params()->fromPost();
 
     $maxConcurrent = max(0, (int) ($post['max_concurrent_downloads_global'] ?? 1));
-    $maxBytes = max(0, $this->parseSizeToBytes($post['max_bytes_per_download'] ?? '3221225472'));
-    $maxTotal = max(0, $this->parseSizeToBytes($post['max_total_active_bytes'] ?? '6442450944'));
+    $maxBytes = max(0, $this->parseSizeToBytes($post['max_bytes_per_download'] ?? '8589934592'));
+    $maxTotal = max(0, $this->parseSizeToBytes($post['max_total_active_bytes'] ?? '8589934592'));
     $maxFiles = max(1, (int) ($post['max_files_per_download'] ?? 1000));
     $ttl = max(60, (int) ($post['progress_token_ttl'] ?? 7200));
 
