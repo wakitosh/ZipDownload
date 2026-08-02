@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.12 (2026-08-02)
+
+- Client: Base the download-panel progress on the bytes the browser has actually received, read incrementally from the response stream, instead of the server-side `bytes_sent` counter. The server counter only tracks what PHP wrote to the output stream; with FastCGI/proxy buffering it reaches 100% while the browser is still receiving, so the ETA collapsed to a few seconds and the panel then appeared frozen for the rest of a multi-GB transfer. The reported time now covers ZIP building and transfer together.
+- Client: Show transferred size, total size and current speed alongside the percentage, and repaint every 500 ms independently of the 1.2 s status poll, so the display keeps moving while the server is quiet.
+- Client: Prefer `Content-Length`, then the actual archive size the server reports on completion, then the client-side estimate, when computing the remaining time.
+- Client: Fold received chunks into `Blob` parts every 64 MB so multi-GB archives do not accumulate on the JS heap. Browsers without streaming response bodies fall back to the previous `Response.blob()` path.
+
+日本語サマリ:
+- クライアント: ダウンロードパネルの進捗を、サーバー側の `bytes_sent` ではなく、レスポンスをストリームで読み取って得た「ブラウザが実際に受信したバイト数」を基準に変更しました。サーバー側カウンターはPHPが出力ストリームに書いた量しか数えておらず、FastCGI/プロキシのバッファリングによりブラウザの受信中に100%へ到達してしまうため、残り時間が数秒まで落ちた後、数GB規模の転送が終わるまで画面が停止したように見えていました。表示される残り時間がZIP生成と転送の両方を含むようになります。
+- クライアント: パーセンテージに加えて転送済みサイズ・全体サイズ・現在の速度を表示し、1.2秒間隔のステータスポーリングとは独立に500msごとに再描画するようにしました。サーバーからの応答がない間も表示が動き続けます。
+- クライアント: 残り時間の計算に用いる全体サイズを、`Content-Length` → 完了時にサーバーが報告する実サイズ → クライアント側の推定値、の優先順で採用するようにしました。
+- クライアント: 受信チャンクを64MBごとに `Blob` へ畳み込み、数GBのアーカイブがJSヒープに蓄積しないようにしました。ストリーミング非対応のブラウザーでは従来の `Response.blob()` 方式にフォールバックします。
+
 ## 0.3.11 (2026-07-24)
 
 - Server: Make the ZIP streaming endpoint (`/zip-download/item/:id`) POST-only before any database or log work is performed. Crawlers had discovered the endpoint URL embedded in item-page data attributes and requested it without `media_ids`, producing many noisy “No media selected” failed log rows. Normal UI downloads already use POST and are unchanged.

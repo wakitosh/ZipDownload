@@ -66,6 +66,27 @@
         } catch (e) { }
         try { alert(String(msg)); } catch (e) { }
     }
+    function fmtBytes(n) {
+        const b = Number(n) || 0;
+        if (b >= 1024 * 1024 * 1024) return (b / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+        if (b >= 1024 * 1024) return (b / (1024 * 1024)).toFixed(1) + ' MB';
+        if (b >= 1024) return Math.round(b / 1024) + ' KB';
+        return b + ' B';
+    }
+    function fmtSpeed(bytesPerSec) {
+        const s = Number(bytesPerSec) || 0;
+        if (s <= 0) return '';
+        return fmtBytes(s) + '/s';
+    }
+    function fmtDuration(sec) {
+        const total = Math.max(0, Math.round(Number(sec) || 0));
+        const h = Math.floor(total / 3600);
+        const m = Math.floor((total % 3600) / 60);
+        const s = total % 60;
+        return h > 0
+            ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+            : `${m}:${String(s).padStart(2, '0')}`;
+    }
     function findRowByMediaId(panel, id) {
         return qsa(panel, '.download-panel__check').find(b => String(b.getAttribute('data-media-id')) === String(id));
     }
@@ -205,44 +226,146 @@
             } catch (e) { return null; }
         };
 
-        let smoothedSent = 0, lastUpdate = Date.now();
+        // --- Progress model -------------------------------------------------
+        // The server-side counters (bytes_sent) only track what PHP has handed
+        // to the output stream. With FastCGI/proxy buffering the web server can
+        // absorb gigabytes in seconds, so those counters race to 100% while the
+        // browser is still receiving the body — which is why the ETA used to
+        // drop to a few seconds and then appear frozen for multi-GB archives.
+        // The bytes actually read from the response stream below measure the
+        // whole pipeline (build + transfer), so they drive the ETA. The server
+        // counters are only used before the first byte arrives, and to learn
+        // the exact archive size once the build has finished.
+        let serverStatus = 'running';
+        let serverSent = 0;
+        let serverTotal = totalBytes;   // estimate until the server reports actual
+        let buildFinished = false;
+        let receivedBytes = 0;
+        let receiveStartedAt = 0;
+        let speedEma = 0;               // bytes/sec, smoothed
+        // The server strips Content-Length (chunked transfer), but honour it if
+        // a proxy in front puts it back: it is the only exact total available.
+        const contentLength = Number(res.headers.get('content-length') || 0) || 0;
+
+        // Best known size of the ZIP being transferred, in preference order:
+        // exact Content-Length, actual bytes the build produced, client estimate.
+        function knownTotal() {
+            if (contentLength > 0) return contentLength;
+            if (buildFinished && serverTotal > 0) return serverTotal;
+            return totalBytes > 0 ? totalBytes : serverTotal;
+        }
+
+        function render() {
+            if (!polling) return;
+            const total = knownTotal();
+            // Nothing received yet: the archive is still being assembled.
+            if (receivedBytes <= 0) {
+                if (serverSent > 0 && total > 0) {
+                    const pct = Math.min(99, Math.floor((serverSent / total) * 100));
+                    progress.textContent = t(panel,
+                        `ZIPを作成しています… ${pct}%`,
+                        `Building ZIP… ${pct}%`);
+                } else {
+                    progress.textContent = t(panel, 'ZIPを作成しています…', 'Building ZIP…');
+                }
+                return;
+            }
+            const elapsed = Math.max(0.5, (Date.now() - receiveStartedAt) / 1000);
+            const average = receivedBytes / elapsed;
+            // Blend recent throughput with the run average: recent alone is too
+            // jittery, the average alone reacts too slowly on long transfers.
+            const speed = speedEma > 0 ? (0.6 * speedEma + 0.4 * average) : average;
+            const speedText = fmtSpeed(speed);
+            if (total > receivedBytes && speed > 0) {
+                const pct = Math.min(99, Math.floor((receivedBytes / total) * 100));
+                const eta = fmtDuration((total - receivedBytes) / speed);
+                progress.textContent = t(panel,
+                    `ダウンロード中: ${pct}% 残り約 ${eta}（${fmtBytes(receivedBytes)} / ${fmtBytes(total)}, ${speedText}）`,
+                    `Downloading: ${pct}% about ${eta} left (${fmtBytes(receivedBytes)} / ${fmtBytes(total)}, ${speedText})`);
+            } else if (total > 0) {
+                // Received at least the expected size (ZIP framing adds a little
+                // over the estimate) — the transfer is on its last chunks.
+                progress.textContent = t(panel,
+                    `ダウンロード中: まもなく完了（${fmtBytes(receivedBytes)}, ${speedText}）`,
+                    `Downloading: finishing up (${fmtBytes(receivedBytes)}, ${speedText})`);
+            } else {
+                // Size estimate unavailable: show progress without an ETA.
+                progress.textContent = t(panel,
+                    `ダウンロード中: ${fmtBytes(receivedBytes)}（${speedText}）`,
+                    `Downloading: ${fmtBytes(receivedBytes)} (${speedText})`);
+            }
+        }
+
+        // Repaint independently of the status poll so the ETA keeps counting
+        // down — and the byte counter keeps moving — while the server is quiet.
+        const renderTimer = setInterval(render, 500);
+
         const pollLoop = (async () => {
             while (polling) {
                 const s = await pollStatus();
                 if (s) {
-                    const sent = Number(s.bytes_sent || 0); const total = Number(s.total_bytes || totalBytes || 0);
-                    const now = Date.now(); const dt = Math.max(1, now - lastUpdate); lastUpdate = now;
-                    const alpha = Math.min(0.6, 0.2 + Math.log10(Math.min(1000, dt)) * 0.05);
-                    smoothedSent = Math.round(alpha * sent + (1 - alpha) * smoothedSent);
-                    if (s.status === 'running') {
-                        if (total > 0) {
-                            const pct = Math.min(100, Math.round((smoothedSent / total) * 100));
-                            const started = Number(s.started_at || 0);
-                            let etaText = '';
-                            if (started > 0 && smoothedSent > 0 && total > smoothedSent) {
-                                const elapsed = Math.max(1, Date.now() / 1000 - started);
-                                const speed = smoothedSent / elapsed;
-                                const remain = Math.max(0, total - smoothedSent);
-                                const eta = Math.round(remain / Math.max(1, speed));
-                                const h = Math.floor(eta / 3600);
-                                const m = Math.floor((eta % 3600) / 60);
-                                const ssec = eta % 60;
-                                etaText = h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(ssec).padStart(2, '0')}` : `${m}:${String(ssec).padStart(2, '0')}`;
-                            }
-                            progress.textContent = t(panel, `処理中: ${pct}% 予想残り: ${etaText}`, `Processing: ${pct}% ETA: ${etaText}`);
-                        } else {
-                            progress.textContent = t(panel, `処理中: ${Math.round(smoothedSent / 1024)}KB`, `Processing: ${Math.round(smoothedSent / 1024)}KB`);
-                        }
-                    } else if (s.status === 'done') {
-                        progress.textContent = t(panel, 'ZIP 準備完了。ダウンロード中…', 'ZIP ready. Downloading…');
+                    serverStatus = String(s.status || '');
+                    serverSent = Number(s.bytes_sent || 0) || 0;
+                    const reported = Number(s.total_bytes || 0) || 0;
+                    if (reported > 0) serverTotal = reported;
+                    if (serverStatus === 'done') {
+                        // total_bytes is now the real archive payload size, so
+                        // the ETA below stops relying on the client estimate.
+                        buildFinished = true;
+                        render();
                         break;
-                    } else if (s.status === 'error') {
-                        progress.textContent = t(panel, 'ダウンロードに失敗しました。', 'Download failed.'); polling = false; break;
                     }
+                    if (serverStatus === 'error') {
+                        progress.textContent = t(panel, 'ダウンロードに失敗しました。', 'Download failed.');
+                        polling = false;
+                        break;
+                    }
+                    render();
                 }
                 await new Promise(r => setTimeout(r, pollInterval));
             }
         })();
+
+        // Read the body incrementally instead of res.blob() so that the bytes
+        // the browser has actually received are observable.
+        async function readBodyWithProgress(response) {
+            const reader = (response.body && typeof response.body.getReader === 'function')
+                ? response.body.getReader() : null;
+            if (!reader) return await response.blob();
+            // Raw chunks live on the JS heap, which is fatal for multi-GB
+            // archives. Fold them into Blobs every FLUSH_BYTES so the data
+            // moves into the browser's blob store (which can spill to disk),
+            // the way res.blob() used to handle it.
+            const FLUSH_BYTES = 64 * 1024 * 1024;
+            const parts = [];
+            let pending = [], pendingBytes = 0;
+            const flush = () => {
+                if (!pendingBytes) return;
+                parts.push(new Blob(pending));
+                pending = []; pendingBytes = 0;
+            };
+            let sampleAt = Date.now(), sampleBytes = 0;
+            for (;;) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (!value || !value.byteLength) continue;
+                if (!receiveStartedAt) receiveStartedAt = Date.now();
+                pending.push(value);
+                pendingBytes += value.byteLength;
+                receivedBytes += value.byteLength;
+                if (pendingBytes >= FLUSH_BYTES) flush();
+                const now = Date.now();
+                const dt = now - sampleAt;
+                if (dt >= 400) {
+                    const instant = ((receivedBytes - sampleBytes) * 1000) / dt;
+                    speedEma = speedEma > 0 ? (0.25 * instant + 0.75 * speedEma) : instant;
+                    sampleAt = now;
+                    sampleBytes = receivedBytes;
+                }
+            }
+            flush();
+            return new Blob(parts, { type: 'application/zip' });
+        }
 
         const btn = qs(panel, '[data-action="download"]'); if (btn) btn.disabled = true;
         let cancelBtn = qs(panel, '[data-action="cancel"]'); let createdCancel = false;
@@ -266,7 +389,8 @@
         cancelBtn.addEventListener('click', onCancel);
 
         try {
-            const blob = await res.blob(); polling = false; await pollLoop;
+            const blob = await readBodyWithProgress(res); polling = false; await pollLoop;
+            progress.textContent = t(panel, 'ダウンロードを保存しています…', 'Saving download…');
             const safe = title.replace(/\s+/g, ' ').replace(/[\\/:*?"<>|]/g, '_').slice(0, 120) || 'download';
             blobSave(blob, `${safe}.zip`);
         } catch (e) {
@@ -274,7 +398,7 @@
             try { userCanceled = true; progress.textContent = t(panel, 'ダウンロードは中止されました。', 'Download canceled.'); }
             catch (e2) { console.error(e2); notify(panel, t(panel, 'ZIPの作成に失敗しました。時間をおいて再度お試しください。', 'Failed to build ZIP. Please try again later.')); }
         } finally {
-            polling = false; if (btn) btn.disabled = false;
+            polling = false; clearInterval(renderTimer); if (btn) btn.disabled = false;
             if (cancelBtn) { cancelBtn.removeEventListener('click', onCancel); if (cancelBtn.parentNode) cancelBtn.remove(); }
             progress.textContent = '';
         }
